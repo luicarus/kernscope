@@ -22,9 +22,9 @@
 - Current `rms_norm` API: `rms_norm(x, weight, eps=1e-6, *, backend="torch")`; use `backend="triton"` for the CUDA kernel.
 - RMSNorm inputs have shape `(..., hidden_size)` and `weight` has shape `(hidden_size,)`; inputs are contiguous and share device and dtype.
 - Support FP16, BF16, and FP32. Accumulate in FP32 and return the input dtype. Reject invalid shapes, dtypes, devices, and epsilon values clearly.
-- Keep Triton inference-only and require CUDA tensors; preserve the PyTorch backend for CPU development and autograd.
-- Keep fused residual RMSNorm as a separate operator with its own contract and correctness coverage.
-- Do not add SGLang or QuantAssay as core package dependencies. Keep SGLang adapters version-pinned under `integrations/sglang/`.
+- Keep the plain RMSNorm PyTorch backend usable on CPU and with autograd; the Triton backend is CUDA-only and inference-only.
+- `fused_add_rms_norm(x, residual, weight, eps=1e-6, *, backend="torch")` mutates `residual` to the sum and `x` to its normalized result, then returns `None`; use `backend="triton"` for CUDA. Use FP32 intermediates, preserve input dtypes, require matching contiguous inputs with non-overlapping storage, and keep it inference-only.
+- Keep Kernscope independent of serving frameworks; version-specific adapters belong in consumer projects such as QuantAssay.
 
 ## Evidence and claims
 
