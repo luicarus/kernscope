@@ -19,9 +19,10 @@
 
 - Keep public operators in `src/kernscope/ops/` and backend selection in the core package.
 - Start with a PyTorch reference, then add a Triton implementation against the same contract.
-- Current `rms_norm` API: `rms_norm(x, weight, eps=1e-6, *, backend="torch")`.
+- Current `rms_norm` API: `rms_norm(x, weight, eps=1e-6, *, backend="torch")`; use `backend="triton"` for the CUDA kernel.
 - RMSNorm inputs have shape `(..., hidden_size)` and `weight` has shape `(hidden_size,)`; inputs are contiguous and share device and dtype.
 - Support FP16, BF16, and FP32. Accumulate in FP32 and return the input dtype. Reject invalid shapes, dtypes, devices, and epsilon values clearly.
+- Keep Triton inference-only and require CUDA tensors; preserve the PyTorch backend for CPU development and autograd.
 - Keep fused residual RMSNorm as a separate operator with its own contract and correctness coverage.
 - Do not add SGLang or QuantAssay as core package dependencies. Keep SGLang adapters version-pinned under `integrations/sglang/`.
 

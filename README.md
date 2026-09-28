@@ -3,7 +3,7 @@
 > A reusable LLM GPU operator library for memory-constrained GPUs, with a versioned SGLang integration for QuantAssay.
 
 **Repository:** `luicarus/kernscope`
-**Status:** Milestone 1 in progress: package skeleton and PyTorch RMSNorm reference are in place. CPU correctness cases, Triton kernels, and serving integration remain to be done.
+**Status:** PyTorch and Triton implementations of plain RMSNorm pass CPU and GPU correctness checks. An isolated microbenchmark is available; serving integration remains to be done.
 
 Kernscope aims to be a small, installable library of dependable LLM inference operators for constrained consumer GPUs. Its first integration target is the Qwen3-0.6B serving path measured by [QuantAssay](https://github.com/luicarus/quantassay).
 
@@ -29,13 +29,17 @@ The first operator family is RMSNorm:
 1. `rms_norm`: normalize over the final dimension, accumulate in FP32, and return the input dtype.
 2. `fused_add_rms_norm`: add the residual and normalize in one operator, matching the fused path used by transformer layers.
 
-Both operators will begin with a PyTorch reference and then receive Triton implementations. Initial input dtypes are FP16, BF16, and FP32. The first public API is `kernscope.rms_norm(x, weight, eps=1e-6, *, backend="torch")`.
+Both operators begin with a PyTorch reference and then receive Triton implementations. Initial input dtypes are FP16, BF16, and FP32. The public API is `kernscope.rms_norm(x, weight, eps=1e-6, *, backend="torch")`; the Triton backend is selected with `backend="triton"`.
 
-For `rms_norm`, `x` has shape `(..., hidden_size)` and `weight` has shape `(hidden_size,)`. Both must be contiguous tensors on the same device with the same supported dtype. The operator computes `x * rsqrt(mean(x ** 2) + eps) * weight` over the last dimension. `eps` must be finite and positive. Squaring, reduction, and scaling use FP32 values; the result is converted back to `x.dtype`. Leading dimensions are preserved. The initial `torch` backend runs on CPU or on a device supported by PyTorch; later backends will be added behind the same API.
+For `rms_norm`, `x` has shape `(..., hidden_size)` and `weight` has shape `(hidden_size,)`. Both must be contiguous tensors on the same device with the same supported dtype. The operator computes `x * rsqrt(mean(x ** 2) + eps) * weight` over the last dimension. `eps` must be finite and positive. Squaring, reduction, and scaling use FP32 values; the result is converted back to `x.dtype`. Leading dimensions are preserved. The `torch` backend runs on CPU or on any device supported by PyTorch. The inference-only `triton` backend requires CUDA tensors.
 
 As a hand-check, `x = [3, 4]`, `weight = [1, 1]`, and `eps = 1e-6` produce approximately `[0.8485, 1.1314]`.
 
-The package currently includes only the plain RMSNorm reference. The fused operator, CPU correctness suite, and Triton implementation are still pending.
+CPU tests compare against FP64 math, while GPU tests compare the Triton backend against the PyTorch backend. Both use `rtol`/`atol` of `1e-6` for FP32, `1e-3` for FP16, and `1e-2` for BF16. Install test and GPU dependencies with `pip install -e ".[test,gpu]"`, then run `pytest`; GPU cases skip when CUDA is unavailable.
+
+Run the isolated CUDA Graph microbenchmark with `python benchmarks/bench_rms_norm.py --output benchmarks/results/rms_norm.csv`. It records median operator latency, GPU, driver, CUDA, PyTorch, and Triton versions; it does not measure SGLang serving latency. Two initial RTX 3050 Ti runs are saved under `benchmarks/results/`.
+
+The package currently includes plain RMSNorm implementations and CPU/GPU correctness cases. The fused operator and SGLang adapter are still pending.
 
 Next candidates are SwiGLU and GEMV. Attention is later work, selected only when profiling shows that it is a meaningful bottleneck. The first release will not try to replace every kernel in SGLang or implement a complete inference engine.
 

@@ -10,5 +10,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["torch"]
 
+[project.optional-dependencies]
+test = ["pytest>=8"]
+gpu = ["triton>=3.4"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
