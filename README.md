@@ -1,17 +1,17 @@
-# TinyInferKernels
+# Kernscope
 
 > A reusable LLM GPU operator library for memory-constrained GPUs, with a versioned SGLang integration for QuantAssay.
 
-**Repository:** `luicarus/tiny-infer-kernels`  
+**Repository:** `luicarus/kernscope`
 **Status:** Project concept; implementation has not started.
 
-TinyInferKernels aims to be a small, installable library of dependable LLM inference operators for constrained consumer GPUs. Its first integration target is the Qwen3-0.6B serving path measured by [QuantAssay](https://github.com/luicarus/quantassay).
+Kernscope aims to be a small, installable library of dependable LLM inference operators for constrained consumer GPUs. Its first integration target is the Qwen3-0.6B serving path measured by [QuantAssay](https://github.com/luicarus/quantassay).
 
 This project is a kernel library. Correctness tests, benchmarks, and profiler reports are how each operator earns its place in the library; they are not the product by themselves.
 
 ## Why this project
 
-QuantAssay compares quantized and BF16 models through a live SGLang server. Its current end-to-end result reflects the kernels SGLang actually executes. TinyInferKernels adds a reusable low-level operator backend to that stack, so we can evaluate whether a kernel improves real model serving as well as an isolated operation.
+QuantAssay compares quantized and BF16 models through a live SGLang server. Its current end-to-end result reflects the kernels SGLang actually executes. Kernscope adds a reusable low-level operator backend to that stack, so we can evaluate whether a kernel improves real model serving as well as an isolated operation.
 
 The local development machine currently has no NVIDIA GPU. CPU reference behavior and package structure can be developed locally; CUDA execution, GPU correctness, profiling, and serving measurements must be verified later on an NVIDIA GPU host. No performance result is claimed in this concept.
 
@@ -50,9 +50,9 @@ QuantAssay's W4A16 serving path currently uses Marlin for quantized linear layer
 
 ### Serving comparison
 
-When the adapter is ready, compare the built-in SGLang backend and TinyInferKernels under the same model, request set, and serving settings:
+When the adapter is ready, compare the built-in SGLang backend and Kernscope under the same model, request set, and serving settings:
 
-| Model path | Built-in backend | TinyInferKernels backend |
+| Model path | Built-in backend | Kernscope backend |
 |---|---:|---:|
 | BF16 | measure | measure |
 | W4A16 | measure | measure |
@@ -62,7 +62,7 @@ This separates the effect of the operator backend from the effect of quantizatio
 ## Proposed package layout
 
 ```text
-src/tinyinferkernels/
+src/kernscope/
   ops/                 Public operator API and validation
   backends/            PyTorch reference and Triton implementations
   dispatch.py          Backend selection and supported-shape rules
@@ -91,15 +91,15 @@ The core package will not import QuantAssay or SGLang. Integration code will be 
 - Every operator has a documented input contract and a PyTorch reference.
 - Triton outputs match the reference within a documented tolerance on the target GPU and supported shapes.
 - Benchmarks record the actual GPU, driver, framework versions, input shapes, dtype, and selected backend.
-- The SGLang adapter makes the serving process execute TinyInferKernels, and the selected backend is visible in QuantAssay artifacts.
+- The SGLang adapter makes the serving process execute Kernscope, and the selected backend is visible in QuantAssay artifacts.
 - No speedup is claimed without measured kernel-level and end-to-end evidence.
 
 ## Target integration baseline
 
-QuantAssay's repository currently documents a tested environment of RTX 3050 Ti Laptop GPU (4 GB), Ubuntu 24.04 under WSL2, Python 3.12, and a pinned SGLang/PyTorch stack. TinyInferKernels will initially target that integration environment rather than promise broad compatibility. This is a target, not evidence that TinyInferKernels has already run there.
+QuantAssay's repository currently documents a tested environment of RTX 3050 Ti Laptop GPU (4 GB), Ubuntu 24.04 under WSL2, Python 3.12, and a pinned SGLang/PyTorch stack. Kernscope will initially target that integration environment rather than promise broad compatibility. This is a target, not evidence that Kernscope has already run there.
 
 ## Naming
 
-- Project and distribution name: **TinyInferKernels** / `tiny-infer-kernels`
-- Python import name: `tinyinferkernels`
+- Project, distribution, and repository name: **Kernscope** / `kernscope`
+- Python import name: `kernscope`
 - Initial positioning: **LLM inference operators for memory-constrained GPUs**
