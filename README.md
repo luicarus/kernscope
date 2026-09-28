@@ -13,8 +13,6 @@ This project is a kernel library. Correctness tests, benchmarks, and profiler re
 
 QuantAssay compares quantized and BF16 models through a live SGLang server. Its current end-to-end result reflects the kernels SGLang actually executes. Kernscope adds a reusable low-level operator backend to that stack, so we can evaluate whether a kernel improves real model serving as well as an isolated operation.
 
-The local development machine currently has no NVIDIA GPU. CPU reference behavior and package structure can be developed locally; CUDA execution, GPU correctness, profiling, and serving measurements must be verified later on an NVIDIA GPU host. No performance result is claimed in this concept.
-
 ## Goals
 
 - Publish a normal Python package with a small, stable operator API.
