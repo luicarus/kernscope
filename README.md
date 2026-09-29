@@ -43,13 +43,13 @@ Run the isolated CUDA Graph microbenchmark with `python benchmarks/bench_rms_nor
 
 A three-repeat 512×1024 baseline is saved at `benchmarks/results/rms_norm-20260928T124252Z.csv`.
 
-Profile one Triton launch with Nsight Compute from the repository root: `ncu --target-processes all --kernel-name regex:rms_norm_kernel --launch-count 1 --export benchmarks/results/rms_norm-fp32-512x1024 python benchmarks/profile_rms_norm.py`. The command saves a `.ncu-rep` report that can be opened in Nsight Compute.
+Profile one BF16 Triton launch with Nsight Compute from the repository root: `ncu --target-processes all --kernel-name regex:rms_norm_kernel --launch-count 1 --export benchmarks/results/rms_norm-bf16-512x1024 python benchmarks/profile_rms_norm.py --dtype bf16`. The command saves a `.ncu-rep` report that can be opened in Nsight Compute.
 
-The first FP32 profile for 512 rows and hidden size 1024 is saved at `benchmarks/results/rms_norm-fp32-512x1024.ncu-rep`.
+The BF16 profile for 512 rows and hidden size 1024 is saved at `benchmarks/results/rms_norm-bf16-512x1024.ncu-rep`.
 
-Profile the fused kernel with `ncu --target-processes all --kernel-name regex:fused_add_rms_norm_kernel --launch-count 1 --export benchmarks/results/fused_add_rms_norm-fp32-512x1024 python benchmarks/profile_fused_add_rms_norm.py`. This creates a separate `.ncu-rep` report for the fused operator.
+Profile the fused kernel with `ncu --target-processes all --kernel-name regex:fused_add_rms_norm_kernel --launch-count 1 --export benchmarks/results/fused_add_rms_norm-bf16-512x1024 python benchmarks/profile_fused_add_rms_norm.py --dtype bf16`. This creates a separate `.ncu-rep` report for the fused operator.
 
-The three-repeat fused benchmark is saved at `benchmarks/results/fused_add_rms_norm-20260928T133037Z.csv`; its FP32 512×1024 Nsight Compute report is `benchmarks/results/fused_add_rms_norm-fp32-512x1024.ncu-rep`.
+The three-repeat fused benchmark is saved at `benchmarks/results/fused_add_rms_norm-20260928T133037Z.csv`; its BF16 512×1024 Nsight Compute report is `benchmarks/results/fused_add_rms_norm-bf16-512x1024.ncu-rep`.
 
 The package includes PyTorch and Triton implementations of both RMSNorm operators. Serving frameworks can call these public operators from adapters maintained by their consumer projects.
 
