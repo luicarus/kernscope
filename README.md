@@ -1,131 +1,142 @@
 # Kernscope
 
-> A reusable LLM GPU operator library for memory-constrained GPUs, designed for downstream projects such as QuantAssay.
+LLM inference operators with PyTorch references and Triton CUDA kernels, developed on a 4 GB NVIDIA GPU.
 
-**Repository:** `luicarus/kernscope`
-**Status:** Plain and fused RMSNorm pass CPU and GPU correctness checks. Framework adapters are maintained by downstream projects.
+Kernscope currently provides **RMSNorm** and **fused residual-add RMSNorm** as directly callable Python operators. Each has an explicit numerical contract, correctness checks, microbenchmarks, and Nsight Compute reports. The package depends on PyTorch, with Triton as an optional GPU dependency.
 
-Kernscope aims to be a small, installable library of dependable LLM inference operators for constrained consumer GPUs. Its first integration target is the Qwen3-0.6B serving path measured by [QuantAssay](https://github.com/luicarus/quantassay).
+## Install from source
 
-This project is a kernel library. Correctness tests, benchmarks, and profiler reports are how each operator earns its place in the library; they are not the product by themselves.
-
-## Why this project
-
-QuantAssay compares quantized and BF16 models through a live SGLang server. Its current end-to-end result reflects the kernels SGLang actually executes. Kernscope adds a reusable low-level operator backend to that stack, so we can evaluate whether a kernel improves real model serving as well as an isolated operation.
-
-## Goals
-
-- Publish a normal Python package with a small, stable operator API.
-- Provide explicit numerical behavior, supported input contracts, and backend selection.
-- Keep a PyTorch reference backend for correctness checks and CPU development.
-- Add Triton CUDA implementations for selected LLM inference operators.
-- Route supported operators into a pinned SGLang runtime, then let QuantAssay measure the resulting serving path.
-- Target memory-constrained consumer GPUs, initially the RTX 3050 Ti Laptop GPU with 4 GB of VRAM.
-
-## Initial scope
-
-The first operator family is RMSNorm:
-
-1. `rms_norm`: normalize over the final dimension, accumulate in FP32, and return the input dtype.
-2. `fused_add_rms_norm`: add the residual and normalize in one operator, matching the fused path used by transformer layers.
-
-Both operators have PyTorch references and Triton implementations. Initial input dtypes are FP16, BF16, and FP32. The public API is `kernscope.rms_norm(x, weight, eps=1e-6, *, backend="torch")`; the Triton backend is selected with `backend="triton"`.
-
-The fused API is `kernscope.fused_add_rms_norm(x, residual, weight, eps=1e-6, *, backend="torch")`; `backend="triton"` selects the CUDA kernel. It computes `s = x + residual`, stores `s` in `residual`, stores `s * rsqrt(mean(s ** 2) + eps) * weight` in `x`, and returns `None`; callers use the mutated tensors. `x` and `residual` have matching shape `(..., hidden_size)`, dtype, and device; `weight` has shape `(hidden_size,)`. All tensors are contiguous, share dtype/device, and use non-overlapping storage. Addition, reduction, and scaling use FP32 intermediates; updated tensors retain the input dtype. `eps` must be finite and positive. This in-place operator is inference-only.
-
-For `rms_norm`, `x` has shape `(..., hidden_size)` and `weight` has shape `(hidden_size,)`. Both must be contiguous tensors on the same device with the same supported dtype. The operator computes `x * rsqrt(mean(x ** 2) + eps) * weight` over the last dimension. `eps` must be finite and positive. Squaring, reduction, and scaling use FP32 values; the result is converted back to `x.dtype`. Leading dimensions are preserved. The `torch` backend runs on CPU or on any device supported by PyTorch. The inference-only `triton` backend requires CUDA tensors.
-
-The Triton RMSNorm implementation processes four rows per program with eight warps, selected by the 512×1024 BF16 profile.
-
-As a hand-check, `x = [3, 4]`, `weight = [1, 1]`, and `eps = 1e-6` produce approximately `[0.8485, 1.1314]`.
-
-CPU tests compare against FP64 math, while GPU tests compare the Triton backend against the PyTorch backend. Both use `rtol`/`atol` of `1e-6` for FP32, `1e-3` for FP16, and `1e-2` for BF16. Install test and GPU dependencies with `pip install -e ".[test,gpu]"`, then run `pytest`; GPU cases skip when CUDA is unavailable.
-
-Run the isolated CUDA Graph microbenchmark with `python benchmarks/bench_rms_norm.py --operator rms_norm` or `--operator fused_add_rms_norm`. It warms up each backend, records three independent medians by default, and writes a new timestamped CSV. The report includes GPU, driver, P-state, clocks, power, temperature, CUDA, PyTorch, and Triton versions. Fused runs use zero inputs so repeated in-place calls are idempotent. An existing output path is never overwritten unless `--overwrite` is passed. This does not measure SGLang serving latency.
-
-A three-repeat 512×1024 baseline is saved at `benchmarks/results/rms_norm-20260928T124252Z.csv`.
-
-Profile three BF16 launches per RMSNorm configuration with Nsight Compute from the repository root. The reports include duration, DRAM sectors, register count, occupancy, and throughput metrics:
+The recorded GPU environment is Ubuntu 24.04 under WSL2 with CUDA-enabled PyTorch. Install a CUDA-enabled PyTorch build before using the Triton backend.
 
 ```bash
-metrics="gpu__time_duration.sum,dram__sectors.sum,launch__registers_per_thread,sm__warps_active.avg.pct_of_peak_sustained_active,sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed"
-ncu --force-overwrite --metrics "$metrics" --target-processes all --kernel-name regex:rms_norm_four_rows_kernel --launch-count 3 --export benchmarks/results/rms_norm-bf16-512x1024-rows4-warps8 python benchmarks/profile_rms_norm.py --dtype bf16 --iterations 3
-ncu --force-overwrite --metrics "$metrics" --target-processes all --kernel-name regex:fused_add_rms_norm_kernel --launch-count 3 --export benchmarks/results/fused_add_rms_norm-bf16-512x1024-warp1 python benchmarks/profile_fused_add_rms_norm.py --dtype bf16 --iterations 3
+git clone https://github.com/luicarus/kernscope.git
+cd kernscope
+python -m pip install -e ".[gpu,test]"
 ```
 
-The RMSNorm before and after reports are saved at `benchmarks/results/rms_norm-bf16-512x1024.ncu-rep` and `benchmarks/results/rms_norm-bf16-512x1024-rows4-warps8.ncu-rep`. The fused RMSNorm reports are saved at `benchmarks/results/fused_add_rms_norm-bf16-512x1024.ncu-rep` and `benchmarks/results/fused_add_rms_norm-bf16-512x1024-warp1.ncu-rep`.
+For CPU reference implementations and tests, install `python -m pip install -e ".[test]"`. The package requires Python 3.10 or newer.
 
-The three-repeat fused baseline and five-repeat 1-warp benchmark are saved at `benchmarks/results/fused_add_rms_norm-20260928T133037Z.csv` and `benchmarks/results/fused_add_rms_norm-20260929T150206Z.csv`.
+## Example: fused residual-add RMSNorm
 
-The package includes PyTorch and Triton implementations of both RMSNorm operators. Serving frameworks can call these public operators from adapters maintained by their consumer projects.
+```python
+import torch
+from kernscope import fused_add_rms_norm
 
-Next candidates are SwiGLU and GEMV. Attention is later work, selected only when profiling shows that it is a meaningful bottleneck. The first release will not try to replace every kernel in SGLang or implement a complete inference engine.
+x = torch.randn(512, 1024, device="cuda", dtype=torch.bfloat16)
+residual = torch.randn_like(x)
+weight = torch.ones(1024, device="cuda", dtype=torch.bfloat16)
 
-## QuantAssay and SGLang integration
+fused_add_rms_norm(x, residual, weight, eps=1e-6, backend="triton")
+# residual now contains the residual sum; x contains its normalized output.
+```
 
-The operator package stays independent of QuantAssay and SGLang. A separate, versioned adapter connects it to the serving runtime.
+The call updates **both `x` and `residual` in place** and returns `None`. `weight` is read-only. For the PyTorch reference, use `backend="torch"`; this also supports CPU tensors.
 
-QuantAssay sends requests to a live SGLang service, so an operator affects its measurements only when SGLang calls that operator while serving the model. For SGLang 0.5.3, Qwen3 uses SGLang's `RMSNorm` class. Its CUDA path calls `sgl_kernel.rmsnorm` when there is no residual and `sgl_kernel.fused_add_rmsnorm` when there is one. Those call sites provide an initial integration point:
+For input snapshots `x_in` and `residual_in`, the fused operator computes:
 
-- [SGLang 0.5.3 RMSNorm implementation](https://github.com/sgl-project/sglang/blob/v0.5.3/python/sglang/srt/layers/layernorm.py)
-- [SGLang 0.5.3 Qwen3 model](https://github.com/sgl-project/sglang/blob/v0.5.3/python/sglang/srt/models/qwen3.py)
+```text
+s        = fp32(x_in) + fp32(residual_in)
+residual = cast_to_input_dtype(s)
+x        = cast_to_input_dtype(s * rsqrt(mean(s², axis=-1) + eps) * fp32(weight))
+```
 
-QuantAssay's current launch and benchmark path is in [`gating.py`](https://github.com/luicarus/quantassay/blob/main/src/quantassay/gating.py) and [`serving/benchmark.py`](https://github.com/luicarus/quantassay/blob/main/src/quantassay/serving/benchmark.py). The first integration will target the SGLang version already pinned by QuantAssay; compatibility with other SGLang versions is separate work.
+Normalization uses the FP32 sum before it is rounded for storage in `residual`.
 
-QuantAssay's W4A16 serving path currently uses Marlin for quantized linear layers. For that reason, the first shared operators are normalization operators. Replacing the quantized linear path is a different and substantially larger integration.
+## Operator contract
 
-### Serving comparison
+Both functions accept `eps=1e-6` and keyword-only `backend="torch"` by default. Select the GPU implementation explicitly with `backend="triton"`.
 
-When the adapter is ready, compare the built-in SGLang backend and Kernscope under the same model, request set, and serving settings:
+| Call | Result | PyTorch backend | Triton backend |
+|---|---|---|---|
+| `rms_norm(x, weight)` | New tensor; preserves input shape and dtype | CPU/CUDA, autograd | CUDA, inference only |
+| `fused_add_rms_norm(x, residual, weight)` | Updates `x` and `residual`; returns `None` | CPU/CUDA, inference only | CUDA, inference only |
 
-| Model path | Built-in backend | Kernscope backend |
-|---|---:|---:|
-| BF16 | measure | measure |
-| W4A16 | measure | measure |
+- Inputs use FP16, BF16, or FP32. Addition, reduction, and scaling use FP32 intermediates.
+- `x` has shape `(..., hidden_size)` with a nonempty final dimension; `weight` has shape `(hidden_size,)`. Tensors must be contiguous and share dtype and device. `eps` must be finite and positive.
+- The fused operator requires `residual` to match `x`. The storage regions of `x`, `residual`, and `weight` must not overlap. Neither the fused operator nor the Triton backend accepts tensors requiring gradients.
 
-This separates the effect of the operator backend from the effect of quantization. Kernel latency and end-to-end serving results will be reported separately.
+## Inside the fused kernel
 
-## Proposed package layout
+One Triton program handles one row, using one warp. It loads `x`, `residual`, and `weight`, keeps the FP32 sum through the reduction, then writes both outputs. Combining these operations in one kernel avoids a separate addition launch and a reload of the sum for normalization.
+
+<details>
+<summary>Show the Triton implementation</summary>
+
+From [src/kernscope/backends/triton.py](src/kernscope/backends/triton.py):
+
+```python
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _fused_add_rms_norm_kernel(
+    x_ptr,
+    residual_ptr,
+    weight_ptr,
+    hidden_size: tl.constexpr,
+    eps: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    row = tl.program_id(0)
+    cols = tl.arange(0, block_size)
+    mask = cols < hidden_size
+    x = tl.load(x_ptr + row * hidden_size + cols, mask, other=0).to(tl.float32)
+    residual = tl.load(residual_ptr + row * hidden_size + cols, mask, other=0).to(tl.float32)
+    weight = tl.load(weight_ptr + cols, mask, other=0).to(tl.float32)
+    summed = x + residual
+    mean_square = tl.sum(summed * summed, axis=0) / hidden_size
+    normalized = summed * tl.rsqrt(mean_square + eps) * weight
+    tl.store(residual_ptr + row * hidden_size + cols, summed, mask)
+    tl.store(x_ptr + row * hidden_size + cols, normalized, mask)
+```
+
+The launcher uses a grid of `x.numel() // x.shape[-1]` programs, a power-of-two column block, and `num_warps=1`. Masks handle the padded columns.
+
+</details>
+
+## Measured kernel optimization
+
+The following compares earlier and current **Triton implementations** on an RTX 3050 Ti Laptop GPU (4 GB), at **512×1024 BF16**. Values are medians of three kernel launches captured by Nsight Compute.
+
+| Operator | Before (µs) | After (µs) | Latency reduction | Current launch configuration |
+|---|---:|---:|---:|---|
+| RMSNorm | 12.544 | 10.176 | 18.9% | 4 rows/program, 8 warps |
+| Fused add RMSNorm | 20.064 | 19.136 | 4.6% | 1 row/program, 1 warp |
+
+The recorded stack uses Python 3.12, PyTorch 2.8.0+cu128, CUDA 12.8, Triton 3.4.0, and host driver 610.47. These gains apply to the measured workload. Launch settings are fixed; other shapes and dtypes can have different tradeoffs, including regressions relative to earlier configurations.
+
+The fused configuration increases registers per thread from 29 to 84 and lowers achieved occupancy from 84.93% to 25.95%, while reducing profiled latency. The [full metrics table](docs/rms_norm_nsight_results.md) records these tradeoffs. CUDA Graph timings are separate measurements; profiling and benchmark latencies should be compared within their respective methods.
+
+## Reproduce the results
+
+```bash
+python -m pytest -q
+python benchmarks/bench_rms_norm.py --operator rms_norm --rows 512 --runs 5
+python benchmarks/bench_rms_norm.py --operator fused_add_rms_norm --rows 512 --runs 5
+```
+
+Tests compare CPU outputs with FP64 math and GPU outputs with the PyTorch references. The `rtol` and `atol` values are both `1e-3` for FP16, `1e-2` for BF16, and `1e-6` for FP32. GPU cases skip when CUDA is unavailable.
+
+Benchmarks use CUDA Graph replay, sweep FP16/BF16/FP32, and write timestamped CSVs with device, software, shape, dtype, backend, and GPU state metadata. Fused timing uses zero inputs so repeated in-place calls are idempotent; correctness checks use nonzero inputs.
+
+See the [profiling guide](docs/profiling.md) for Nsight Compute commands, archived reports, and the source revisions behind the comparison.
+
+## Repository layout
 
 ```text
 src/kernscope/
-  ops/                 Public operator API and validation
-  backends/            PyTorch reference and Triton implementations
-  dispatch.py          Backend selection and supported-shape rules
-
-integrations/
-  sglang/0.5.3/         Version-specific SGLang adapter
-
-benchmarks/             Reproducible kernel benchmarks
-tests/                  CPU reference and GPU correctness checks
+  ops/                 Public APIs, validation, and PyTorch references
+  backends/triton.py   Triton CUDA kernels
+benchmarks/           CUDA Graph benchmarks and Nsight Compute entry points
+docs/                 Measurement results and profiling instructions
+tests/ops/            CPU and GPU correctness checks
 ```
 
-The core package will not import QuantAssay or SGLang. Integration code will be isolated and version-pinned so using the operators outside QuantAssay does not pull in the serving stack.
+## Integration and scope
 
-## Milestones
+Serving adapters belong in consumer projects such as [QuantAssay](https://github.com/luicarus/quantassay). Kernscope can be imported and called without installing SGLang or QuantAssay.
 
-1. **Define the library contract:** package metadata, RMSNorm API, PyTorch reference, and CPU correctness cases.
-2. **Implement the first Triton kernels:** plain RMSNorm and fused residual RMSNorm, then verify them on an NVIDIA GPU.
-3. **Measure and profile:** compare supported shapes and dtypes; retain only optimizations supported by repeatable measurements and profiler evidence.
-4. **Integrate with SGLang 0.5.3:** route Qwen3 RMSNorm calls through the library while keeping the built-in path selectable.
-5. **Add a QuantAssay backend comparison:** record the selected kernel backend in run identity and reports; compare BF16 and W4A16 with matched settings.
-6. **Expand based on evidence:** select SwiGLU, GEMV, or Attention only after identifying a serving bottleneck.
+An [earlier SGLang serving comparison](docs/rms_norm_before_kernel_optimization.md) predates the kernel optimizations above and did not establish an end-to-end speedup. The optimized kernels have not yet been re-evaluated in that serving workload.
 
-## Completion criteria
-
-- The package can be installed and imported without installing SGLang.
-- Every operator has a documented input contract and a PyTorch reference.
-- Triton outputs match the reference within a documented tolerance on the target GPU and supported shapes.
-- Benchmarks record the actual GPU, driver, framework versions, input shapes, dtype, and selected backend.
-- The SGLang adapter makes the serving process execute Kernscope, and the selected backend is visible in QuantAssay artifacts.
-- No speedup is claimed without measured kernel-level and end-to-end evidence.
-
-## Target integration baseline
-
-QuantAssay's repository currently documents a tested environment of RTX 3050 Ti Laptop GPU (4 GB), Ubuntu 24.04 under WSL2, Python 3.12, and a pinned SGLang/PyTorch stack. Kernscope will initially target that integration environment rather than promise broad compatibility. This is a target, not evidence that Kernscope has already run there.
-
-## Naming
-
-- Project, distribution, and repository name: **Kernscope** / `kernscope`
-- Python import name: `kernscope`
-- Initial positioning: **LLM inference operators for memory-constrained GPUs**
+SwiGLU and GEMV are candidates for future operators, subject to a measured workload and an agreed scope. Contribution and agent conventions are documented in [AGENTS.md](AGENTS.md).

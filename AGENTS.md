@@ -1,35 +1,34 @@
-# Kernscope Agent Guide
+# Kernscope Repository Guide
 
-## Project goals
+Read [README.md](README.md) for the supported APIs, environment, and measured results. If `AGENTS.local.md` exists, read it for local workspace preferences; keep that file outside version control.
 
-- Build a reusable LLM inference operator library for memory-constrained GPUs.
-- Treat Kernscope as a long-term learning project and a portfolio project for GPU kernels and operators.
-- Make correctness, benchmarks, profiler evidence, and real serving integration support every performance claim.
-- Keep the core package independent of SGLang and QuantAssay; put runtime adapters in versioned integration directories.
+## Scope and structure
 
-## Working style
+- Keep Kernscope a directly callable LLM inference operator library.
+- Public APIs, validation, and PyTorch references live in `src/kernscope/ops/`; Triton kernels live in `src/kernscope/backends/triton.py`.
+- Keep serving-framework dependencies and version-specific adapters in consumer projects.
+- Add operators when a measured workload or an agreed milestone justifies them.
 
-- Do not use Superpowers skills in this project.
-- Work in small, understandable steps and explain the relevant CUDA, Triton, numerical, or profiling concept briefly as it comes up.
-- Prefer concise code. Keep comments and docstrings to one line when that is clear; avoid boilerplate and premature abstractions.
-- Keep validation and error messages clear. Do not shorten code at the cost of readability or correctness.
-- Follow the README's scope. Add operators only when profiling or the agreed milestone justifies them.
+## Implementation conventions
 
-## Operator contract
+- Establish a PyTorch reference and input contract before adding a Triton implementation.
+- Preserve the public signatures and mutation behavior documented in the README.
+- Support FP16, BF16, and FP32 with FP32 intermediates and input-dtype outputs.
+- Keep plain PyTorch RMSNorm usable on CPU and with autograd. Triton operators and both fused backends are inference-only.
+- The fused operator updates both `x` and `residual`, returns `None`, and normalizes the FP32 sum before storage rounding. Its input storage regions must not overlap.
+- Prefer concise, readable code and short comments. Keep validation errors clear and avoid abstractions without a concrete use.
 
-- Keep public operators in `src/kernscope/ops/` and backend selection in the core package.
-- Start with a PyTorch reference, then add a Triton implementation against the same contract.
-- Current `rms_norm` API: `rms_norm(x, weight, eps=1e-6, *, backend="torch")`; use `backend="triton"` for the CUDA kernel.
-- RMSNorm inputs have shape `(..., hidden_size)` and `weight` has shape `(hidden_size,)`; inputs are contiguous and share device and dtype.
-- Support FP16, BF16, and FP32. Accumulate in FP32 and return the input dtype. Reject invalid shapes, dtypes, devices, and epsilon values clearly.
-- Keep the plain RMSNorm PyTorch backend usable on CPU and with autograd; the Triton backend is CUDA-only and inference-only.
-- `fused_add_rms_norm(x, residual, weight, eps=1e-6, *, backend="torch")` mutates `residual` to the sum and `x` to its normalized result, then returns `None`; use `backend="triton"` for CUDA. Use FP32 intermediates, preserve input dtypes, require matching contiguous inputs with non-overlapping storage, and keep it inference-only.
-- Keep Kernscope independent of serving frameworks; version-specific adapters belong in consumer projects such as QuantAssay.
+## Validation
 
-## Evidence and claims
+- Install development dependencies with `python -m pip install -e ".[gpu,test]"`; use `.[test]` for CPU development.
+- Run relevant correctness checks after numerical, launch, or API changes: `python -m pytest -q`.
+- GPU tests skip without CUDA; report skips accurately when describing validation.
+- Compare both fused outputs and preserve documented tolerances: FP16 `1e-3`, BF16 `1e-2`, FP32 `1e-6` for both `rtol` and `atol`.
 
-- Document input contracts and tolerances for every operator.
-- Record GPU, driver, framework versions, shape, dtype, and backend in benchmark results.
-- Report kernel latency separately from end-to-end serving results.
-- Do not claim a speedup without repeatable measurements; include profiler evidence when explaining an optimization.
-- Keep examples and reports reproducible so the work can support a credible résumé description.
+## Performance evidence
+
+- Record GPU, driver, framework versions, shape, dtype, backend, and measurement method.
+- Distinguish CUDA Graph latency, Nsight Compute profiling, and end-to-end serving results. Scope claims to the measured configuration.
+- Keep reproducible before/after reports and document changes in sampling or aggregation.
+- Use temporary locations for parameter sweeps. Remove rejected implementations and disposable results; retain the selected runtime configuration and its supporting evidence.
+- Consult [docs/profiling.md](docs/profiling.md) for profiling commands and result locations.
