@@ -76,7 +76,7 @@ def test_triton_backend_requires_cuda():
     "dtype,tol",
     [(torch.float16, 1e-3), (torch.bfloat16, 1e-2), (torch.float32, 1e-6)],
 )
-@pytest.mark.parametrize("shape", [(5,), (2, 3, 5), (2, 1024), (3, 1000)])
+@pytest.mark.parametrize("shape", [(5,), (2, 3, 5), (2, 1024), (3, 1000), (512, 1024)])
 def test_triton_matches_torch(dtype, tol, shape):
     eps = 1e-5
     x = torch.linspace(-1.25, 2.0, math.prod(shape)).reshape(shape)

@@ -35,6 +35,8 @@ The fused API is `kernscope.fused_add_rms_norm(x, residual, weight, eps=1e-6, *,
 
 For `rms_norm`, `x` has shape `(..., hidden_size)` and `weight` has shape `(hidden_size,)`. Both must be contiguous tensors on the same device with the same supported dtype. The operator computes `x * rsqrt(mean(x ** 2) + eps) * weight` over the last dimension. `eps` must be finite and positive. Squaring, reduction, and scaling use FP32 values; the result is converted back to `x.dtype`. Leading dimensions are preserved. The `torch` backend runs on CPU or on any device supported by PyTorch. The inference-only `triton` backend requires CUDA tensors.
 
+The Triton RMSNorm implementation processes four rows per program, the configuration selected by the 512×1024 BF16 profile.
+
 As a hand-check, `x = [3, 4]`, `weight = [1, 1]`, and `eps = 1e-6` produce approximately `[0.8485, 1.1314]`.
 
 CPU tests compare against FP64 math, while GPU tests compare the Triton backend against the PyTorch backend. Both use `rtol`/`atol` of `1e-6` for FP32, `1e-3` for FP16, and `1e-2` for BF16. Install test and GPU dependencies with `pip install -e ".[test,gpu]"`, then run `pytest`; GPU cases skip when CUDA is unavailable.
@@ -43,11 +45,17 @@ Run the isolated CUDA Graph microbenchmark with `python benchmarks/bench_rms_nor
 
 A three-repeat 512×1024 baseline is saved at `benchmarks/results/rms_norm-20260928T124252Z.csv`.
 
-Profile one BF16 Triton launch with Nsight Compute from the repository root: `ncu --target-processes all --kernel-name regex:rms_norm_kernel --launch-count 1 --export benchmarks/results/rms_norm-bf16-512x1024 python benchmarks/profile_rms_norm.py --dtype bf16`. The command saves a `.ncu-rep` report that can be opened in Nsight Compute.
+The five-repeat 512×1024 benchmark after the four-row specialization is saved at `benchmarks/results/rms_norm-20260929T141004Z.csv`.
 
-The BF16 profile for 512 rows and hidden size 1024 is saved at `benchmarks/results/rms_norm-bf16-512x1024.ncu-rep`.
+Profile three BF16 launches of the four-row RMSNorm kernel and one fused-kernel launch with Nsight Compute from the repository root. The reports include duration, DRAM sectors, register count, occupancy, and throughput metrics:
 
-Profile the fused kernel with `ncu --target-processes all --kernel-name regex:fused_add_rms_norm_kernel --launch-count 1 --export benchmarks/results/fused_add_rms_norm-bf16-512x1024 python benchmarks/profile_fused_add_rms_norm.py --dtype bf16`. This creates a separate `.ncu-rep` report for the fused operator.
+```bash
+metrics="gpu__time_duration.sum,dram__sectors.sum,launch__registers_per_thread,sm__warps_active.avg.pct_of_peak_sustained_active,sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed"
+ncu --force-overwrite --metrics "$metrics" --target-processes all --kernel-name regex:rms_norm_four_rows_kernel --launch-count 3 --export benchmarks/results/rms_norm-bf16-512x1024-rows4 python benchmarks/profile_rms_norm.py --dtype bf16 --iterations 3
+ncu --metrics "$metrics" --target-processes all --kernel-name regex:fused_add_rms_norm_kernel --launch-count 1 --export benchmarks/results/fused_add_rms_norm-bf16-512x1024 python benchmarks/profile_fused_add_rms_norm.py --dtype bf16
+```
+
+The three-launch RMSNorm baseline and optimized reports are saved at `benchmarks/results/rms_norm-bf16-512x1024.ncu-rep` and `benchmarks/results/rms_norm-bf16-512x1024-rows4.ncu-rep`.
 
 The three-repeat fused benchmark is saved at `benchmarks/results/fused_add_rms_norm-20260928T133037Z.csv`; its BF16 512×1024 Nsight Compute report is `benchmarks/results/fused_add_rms_norm-bf16-512x1024.ncu-rep`.
 
