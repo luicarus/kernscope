@@ -45,17 +45,17 @@ Run the isolated CUDA Graph microbenchmark with `python benchmarks/bench_rms_nor
 
 A three-repeat 512×1024 baseline is saved at `benchmarks/results/rms_norm-20260928T124252Z.csv`.
 
-Profile three BF16 launches of the four-row RMSNorm kernel and one fused-kernel launch with Nsight Compute from the repository root. The reports include duration, DRAM sectors, register count, occupancy, and throughput metrics:
+Profile three BF16 launches per RMSNorm configuration with Nsight Compute from the repository root. The reports include duration, DRAM sectors, register count, occupancy, and throughput metrics:
 
 ```bash
 metrics="gpu__time_duration.sum,dram__sectors.sum,launch__registers_per_thread,sm__warps_active.avg.pct_of_peak_sustained_active,sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed"
 ncu --force-overwrite --metrics "$metrics" --target-processes all --kernel-name regex:rms_norm_four_rows_kernel --launch-count 3 --export benchmarks/results/rms_norm-bf16-512x1024-rows4-warps8 python benchmarks/profile_rms_norm.py --dtype bf16 --iterations 3
-ncu --metrics "$metrics" --target-processes all --kernel-name regex:fused_add_rms_norm_kernel --launch-count 1 --export benchmarks/results/fused_add_rms_norm-bf16-512x1024 python benchmarks/profile_fused_add_rms_norm.py --dtype bf16
+ncu --force-overwrite --metrics "$metrics" --target-processes all --kernel-name regex:fused_add_rms_norm_kernel --launch-count 3 --export benchmarks/results/fused_add_rms_norm-bf16-512x1024-warp1 python benchmarks/profile_fused_add_rms_norm.py --dtype bf16 --iterations 3
 ```
 
-The three-launch RMSNorm baseline and optimized reports are saved at `benchmarks/results/rms_norm-bf16-512x1024.ncu-rep` and `benchmarks/results/rms_norm-bf16-512x1024-rows4-warps8.ncu-rep`.
+The RMSNorm before and after reports are saved at `benchmarks/results/rms_norm-bf16-512x1024.ncu-rep` and `benchmarks/results/rms_norm-bf16-512x1024-rows4-warps8.ncu-rep`. The fused RMSNorm reports are saved at `benchmarks/results/fused_add_rms_norm-bf16-512x1024.ncu-rep` and `benchmarks/results/fused_add_rms_norm-bf16-512x1024-warp1.ncu-rep`.
 
-The three-repeat fused benchmark is saved at `benchmarks/results/fused_add_rms_norm-20260928T133037Z.csv`; its BF16 512×1024 Nsight Compute report is `benchmarks/results/fused_add_rms_norm-bf16-512x1024.ncu-rep`.
+The three-repeat fused baseline and five-repeat 1-warp benchmark are saved at `benchmarks/results/fused_add_rms_norm-20260928T133037Z.csv` and `benchmarks/results/fused_add_rms_norm-20260929T150206Z.csv`.
 
 The package includes PyTorch and Triton implementations of both RMSNorm operators. Serving frameworks can call these public operators from adapters maintained by their consumer projects.
 

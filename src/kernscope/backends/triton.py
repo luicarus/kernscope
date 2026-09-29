@@ -68,14 +68,13 @@ def _fused_add_rms_norm_kernel(
 def fused_add_rms_norm_triton(
     x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
 ) -> None:
-    """Fuse residual addition and RMSNorm in place, one Triton program per row."""
+    """Fuse residual addition and RMSNorm in place, one warp per program."""
     hidden_size = x.shape[-1]
     rows = x.numel() // hidden_size
     if rows == 0:
         return None
 
     block_size = triton.next_power_of_2(hidden_size)
-    num_warps = 4 if block_size >= 128 else 1
     _fused_add_rms_norm_kernel[(rows,)](
-        x, residual, weight, hidden_size, eps, block_size, num_warps=num_warps
+        x, residual, weight, hidden_size, eps, block_size, num_warps=1
     )
