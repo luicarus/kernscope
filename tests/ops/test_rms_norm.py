@@ -40,9 +40,10 @@ def test_matches_hand_calculated_example():
     ],
     ids=["scalar", "weight-shape", "dtype", "weight-dtype", "strided-x", "strided-weight"],
 )
-def test_rejects_invalid_inputs(x, weight, error):
+@pytest.mark.parametrize("backend", ["torch", "triton", "tilelang_ascend"])
+def test_rejects_invalid_inputs(x, weight, error, backend):
     with pytest.raises(error):
-        rms_norm(x, weight)
+        rms_norm(x, weight, backend=backend)
 
 
 @pytest.mark.parametrize(
@@ -56,19 +57,21 @@ def test_rejects_invalid_inputs(x, weight, error):
         ("1e-6", TypeError),
     ],
 )
-def test_rejects_invalid_epsilon(eps, error):
+@pytest.mark.parametrize("backend", ["torch", "triton", "tilelang_ascend"])
+def test_rejects_invalid_epsilon(eps, error, backend):
     with pytest.raises(error):
-        rms_norm(torch.ones(4), torch.ones(4), eps)
+        rms_norm(torch.ones(4), torch.ones(4), eps, backend=backend)
 
 
 def test_rejects_unknown_backend():
-    with pytest.raises(ValueError, match="backend must be 'torch' or 'triton'"):
+    with pytest.raises(ValueError, match="backend must be 'torch', 'triton', or 'tilelang_ascend'"):
         rms_norm(torch.ones(4), torch.ones(4), backend="unknown")
 
 
-def test_triton_backend_requires_cuda():
-    with pytest.raises(ValueError, match="requires CUDA"):
-        rms_norm(torch.ones(4), torch.ones(4), backend="triton")
+@pytest.mark.parametrize("backend,device", [("triton", "CUDA"), ("tilelang_ascend", "NPU")])
+def test_accelerator_backend_requires_device(backend, device):
+    with pytest.raises(ValueError, match=f"requires {device}"):
+        rms_norm(torch.ones(4), torch.ones(4), backend=backend)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

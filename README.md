@@ -46,6 +46,8 @@ Normalization uses the FP32 sum before it is rounded for storage in `residual`.
 
 Both functions accept `eps=1e-6` and keyword-only `backend="torch"` by default. Select the GPU implementation explicitly with `backend="triton"`.
 
+The plain RMSNorm API also recognizes experimental `backend="tilelang_ascend"` for NPU inference. It uses a per-row Vector kernel with FP32 intermediates and full-row UB buffers. The kernel has not yet been compiled or validated on Ascend hardware; very large hidden sizes may exceed UB capacity. This backend requires `torch_npu` and the Ascend build of TileLang, imported only when selected. NPU correctness cases skip when NPU dependencies or hardware are unavailable.
+
 | Call | Result | PyTorch backend | Triton backend |
 |---|---|---|---|
 | `rms_norm(x, weight)` | New tensor; preserves input shape and dtype | CPU/CUDA, autograd | CUDA, inference only |

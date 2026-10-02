@@ -5,7 +5,7 @@ Read [README.md](README.md) for the supported APIs, environment, and measured re
 ## Scope and structure
 
 - Keep Kernscope a directly callable LLM inference operator library.
-- Public APIs, validation, and PyTorch references live in `src/kernscope/ops/`; Triton kernels live in `src/kernscope/backends/triton.py`.
+- Public APIs, validation, and PyTorch references live in `src/kernscope/ops/`; accelerator kernels live in `src/kernscope/backends/`.
 - Keep serving-framework dependencies and version-specific adapters in consumer projects.
 - Add operators when a measured workload or an agreed milestone justifies them.
 
@@ -14,7 +14,7 @@ Read [README.md](README.md) for the supported APIs, environment, and measured re
 - Establish a PyTorch reference and input contract before adding a Triton implementation.
 - Preserve the public signatures and mutation behavior documented in the README.
 - Support FP16, BF16, and FP32 with FP32 intermediates and input-dtype outputs.
-- Keep plain PyTorch RMSNorm usable on CPU and with autograd. Triton operators and both fused backends are inference-only.
+- Keep plain PyTorch RMSNorm usable on CPU and with autograd. Accelerator backends and both fused backends are inference-only.
 - The fused operator updates both `x` and `residual`, returns `None`, and normalizes the FP32 sum before storage rounding. Its input storage regions must not overlap.
 - Prefer concise, readable code and short comments. Keep validation errors clear and avoid abstractions without a concrete use.
 
