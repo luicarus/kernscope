@@ -1,6 +1,5 @@
 import argparse
 import csv
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,28 +8,9 @@ import triton
 import triton.testing
 
 from kernscope import fused_add_rms_norm, rms_norm
+from _environment import GPU_FIELDS, gpu_state
 
 DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
-GPU_FIELDS = ("gpu", "driver", "pstate", "sm_clock_mhz", "memory_clock_mhz", "power_w", "temperature_c")
-
-
-def gpu_state():
-    try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,driver_version,pstate,clocks.current.sm,clocks.current.memory,power.draw,temperature.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        return ["unknown"] * len(GPU_FIELDS)
-    if result.returncode:
-        return ["unknown"] * len(GPU_FIELDS)
-    return [value.strip() for value in next(csv.reader(result.stdout.splitlines()))]
 
 
 def main():

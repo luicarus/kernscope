@@ -1,4 +1,4 @@
-"""Triton RMSNorm kernel."""
+"""Triton CUDA operator kernels."""
 
 import torch
 import triton
@@ -78,3 +78,34 @@ def fused_add_rms_norm_triton(
     _fused_add_rms_norm_kernel[(rows,)](
         x, residual, weight, hidden_size, eps, block_size, num_warps=1
     )
+
+
+@triton.jit
+def _silu_and_mul_kernel(
+    x_ptr,
+    output_ptr,
+    elements,
+    hidden_size: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    offsets = tl.program_id(0) * block_size + tl.arange(0, block_size)
+    mask = offsets < elements
+    input_offsets = (offsets // hidden_size) * (2 * hidden_size) + offsets % hidden_size
+    gate = tl.load(x_ptr + input_offsets, mask, other=0).to(tl.float32)
+    up = tl.load(x_ptr + input_offsets + hidden_size, mask, other=0).to(tl.float32)
+    output = gate * tl.sigmoid(gate) * up
+    tl.store(output_ptr + offsets, output, mask)
+
+
+def silu_and_mul_triton(x: torch.Tensor) -> torch.Tensor:
+    """Fuse SiLU and multiplication in blocks of 1024 output elements."""
+    hidden_size = x.shape[-1] // 2
+    output = torch.empty((*x.shape[:-1], hidden_size), dtype=x.dtype, device=x.device)
+    elements = output.numel()
+    if elements == 0:
+        return output
+
+    _silu_and_mul_kernel[(triton.cdiv(elements, 1024),)](
+        x, output, elements, hidden_size, 1024, num_warps=4
+    )
+    return output

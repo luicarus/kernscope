@@ -21,6 +21,18 @@ Archived CUDA Graph measurements:
 - [Fused RMSNorm baseline](../benchmarks/results/fused_add_rms_norm-20260928T133037Z.csv)
 - [Fused RMSNorm with one warp](../benchmarks/results/fused_add_rms_norm-20260929T150206Z.csv)
 
+## SwiGLU BF16 baseline
+
+Reproduce the SwiGLU baseline from the repository root with:
+
+```bash
+python benchmarks/bench_silu_and_mul.py --rows 1 16 128 512 --hidden-size 1024 4096 8192 --dtype bf16 --runs 5 --rep-ms 50 --warmup 20
+```
+
+Each case uses an input of shape `rows × 2D` and produces an output of shape `rows × D`. The benchmark compares the public PyTorch eager implementation with Triton through CUDA Graph replay, uses seed `0`, warms up both backends for 20 calls, and alternates their order across five repeats. The reported value is the median of the five per-repeat medians; the raw CSV keeps every repeat median. Each shape records GPU state before and after measurement and the source code hash. The performance scope is this FP32-intermediate reference implementation only; it does not represent `torch.compile`, vLLM, or end-to-end serving performance.
+
+The [SwiGLU results table](silu_and_mul_baseline.md) records Nsight metrics at output shape `512×4096`. The [CUDA Graph CSV](../benchmarks/results/silu_and_mul-baseline-20261003T101637Z.csv) retains all 12 shape combinations and 120 repeat measurements; the [NCU report](../benchmarks/results/silu_and_mul-bf16-512x4096-baseline.ncu-rep) contains three kernel launches. The Triton backend file SHA256 in the CSV identifies the implementation measured before it was committed.
+
 ## Nsight Compute
 
 Nsight Compute must be installed separately and have access to GPU performance counters. The following Bash commands capture the current kernels into new report paths outside the repository:
@@ -37,15 +49,21 @@ ncu --metrics "$metrics" --target-processes all \
   --kernel-name regex:fused_add_rms_norm_kernel --launch-count 3 \
   --export /tmp/kernscope-fused-rmsnorm \
   python benchmarks/profile_fused_add_rms_norm.py --rows 512 --hidden-size 1024 --dtype bf16 --iterations 3
+
+ncu --metrics "$metrics" --target-processes all \
+  --cache-control all --clock-control base \
+  --kernel-name regex:silu_and_mul_kernel --launch-count 3 \
+  --export /tmp/kernscope-silu-and-mul \
+  python benchmarks/profile_silu_and_mul.py --rows 512 --hidden-size 4096 --dtype bf16 --iterations 3
 ```
 
-Choose a new export path for subsequent runs. Both reports contain three profiled launches. Fused profiling invokes the operator three times on the same tensors, so each call consumes the preceding call's updated values. Open `.ncu-rep` files in Nsight Compute or inspect their raw metrics with:
+Choose a new export path for subsequent runs. Each report contains three profiled launches. `fused_add_rms_norm` profiling invokes the operator three times on the same tensors, so each call consumes the preceding call's updated values. Open `.ncu-rep` files in Nsight Compute or inspect their raw metrics with:
 
 ```bash
 ncu --import /tmp/kernscope-fused-rmsnorm.ncu-rep --page raw --csv
 ```
 
-The [results table](rms_norm_nsight_results.md) takes the median of each metric across the three launches. `DRAM Bytes` is `dram__sectors.sum × 32 B`; latency reduction is `(before - after) / before`. These are profiled kernel measurements, separate from CUDA Graph timings and serving latency. Registers, occupancy, and throughput explain tradeoffs; none alone establishes a speedup.
+The [RMSNorm results table](rms_norm_nsight_results.md) takes the median of each metric across the three launches. The SwiGLU report uses the same six metrics and takes the median across its three launches; `DRAM Bytes` is `dram__sectors.sum × 32 B`. Its report is independent of the RMSNorm report. These are profiled kernel measurements, separate from CUDA Graph timings and serving latency. Registers, occupancy, and throughput explain tradeoffs; none alone establishes a speedup.
 
 ## Archived reports and implementations
 

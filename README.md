@@ -8,6 +8,7 @@ Current operators:
 
 - **RMSNorm**
 - **fused residual-add RMSNorm**
+- **SwiGLU activation (`silu_and_mul`)**
 
 Current backends:
 
@@ -21,6 +22,7 @@ Current backends:
 |---|---|---|---|
 | `rms_norm` | CPU / CUDA | CUDA | Ascend NPU |
 | `fused_add_rms_norm` | CPU / CUDA | CUDA | — |
+| `silu_and_mul` | CPU / CUDA | CUDA | — |
 
 Backend selection is explicit:
 
@@ -60,6 +62,8 @@ python -m pip install -e ".[gpu,test]"
 A CUDA-enabled PyTorch installation is required before using `backend="triton"`.
 
 The TileLang-Ascend backend requires an Ascend PyTorch environment with `torch_npu` and a compatible TileLang-Ascend installation. These dependencies are imported only when `backend="tilelang_ascend"` is selected, so CPU and CUDA users do not need the Ascend stack installed.
+
+TileLang-Ascend RMSNorm is experimental and has not yet been compiled or validated on Ascend hardware.
 
 ## Quick start
 
@@ -162,6 +166,18 @@ The fused operator updates **both `x` and `residual` in place** and returns `Non
 
 `weight` is read-only.
 
+### SwiGLU activation
+
+```python
+import torch
+
+from kernscope import silu_and_mul
+
+x = torch.randn(8, 2 * 4096, device="cuda", dtype=torch.bfloat16)
+y = silu_and_mul(x, backend="triton")
+# y has shape (8, 4096); x is unchanged.
+```
+
 ## Numerical contract
 
 ### RMSNorm
@@ -212,9 +228,20 @@ x =
 
 Normalization uses the FP32 residual sum before it is rounded for storage in `residual`.
 
+### SwiGLU activation
+
+```text
+D      = x.shape[-1] // 2
+gate   = fp32(x[..., :D])
+up     = fp32(x[..., D:])
+output = cast_to_input_dtype(gate * sigmoid(gate) * up)
+```
+
+All intermediate calculations use FP32; only the final output is cast to the input dtype.
+
 ## API contract
 
-Both operators accept `eps=1e-6`.
+The RMSNorm operators accept `eps=1e-6`. All operators use keyword-only `backend="torch"` by default.
 
 The PyTorch implementation is the default backend:
 
@@ -250,6 +277,8 @@ torch
 triton
 ```
 
+`silu_and_mul` supports the same two backends and has no `eps` parameter.
+
 ### Inputs
 
 Supported dtypes:
@@ -260,7 +289,7 @@ BF16
 FP32
 ```
 
-`x` has shape:
+For the RMSNorm operators, `x` has shape:
 
 ```text
 (..., hidden_size)
@@ -284,6 +313,11 @@ For `fused_add_rms_norm`:
 - `residual` must have the same shape as `x`;
 - `x`, `residual`, and `weight` storage regions must not overlap;
 - `x` and `residual` are modified in place.
+- both its PyTorch and Triton implementations are inference-only.
+
+For `silu_and_mul`, `x` has shape `(..., 2D)` with a nonempty, even final dimension. It must be contiguous and use a supported dtype. `D` may be odd, and batch dimensions may be zero. The result is a new tensor of shape `(..., D)`, preserving dtype and device; `x` is read-only.
+
+The PyTorch references for `rms_norm` and `silu_and_mul` support autograd.
 
 Triton and TileLang-Ascend kernels are inference-only and reject tensors requiring gradients.
 
@@ -348,6 +382,10 @@ The current launch configuration is:
 1 row / program
 1 warp / program
 ```
+
+### SwiGLU activation
+
+One Triton program handles 1024 flattened output elements with four warps. It loads matching gate and up values, computes SiLU and multiplication in FP32, and writes the input-dtype output. Masks handle partial blocks; the input remains unchanged.
 
 ## TileLang-Ascend backend
 
@@ -470,6 +508,12 @@ The complete profiler data is available in:
 
 CUDA Graph benchmark results and Nsight Compute kernel measurements use different timing methods and should only be compared within the same measurement method.
 
+### SwiGLU baseline
+
+At BF16 input `512×8192` and output `512×4096`, CUDA Graph latency is **68.634 µs** for Triton versus **437.280 µs** for this project's PyTorch eager reference with FP32 intermediates (**6.37×**). Values are medians of five repeat medians. The separate Nsight Compute median of three launches is **63.648 µs**, with DRAM throughput at **95.27%** of peak sustained throughput.
+
+The [SwiGLU results table](docs/silu_and_mul_baseline.md) records the selected initial configuration: 1024 output elements/program and four warps. Subsequent parameter, indexing, cache, and load-order experiments did not establish sufficient benefit to replace it. These results apply to the measured reference and workload.
+
 ## Correctness
 
 Run the complete test suite with:
@@ -492,7 +536,7 @@ Ascend hardware-dependent cases automatically skip when `torch_npu`, TileLang, o
 
 CPU tests are checked against high-precision reference computation.
 
-CUDA and Ascend implementations are checked against the same public RMSNorm numerical contract.
+Accelerator tests check each implementation against its corresponding public numerical contract.
 
 Ascend RMSNorm tests currently cover shapes including:
 
@@ -506,6 +550,8 @@ Ascend RMSNorm tests currently cover shapes including:
 as well as zero-valued and empty inputs.
 
 Backend dispatch, device validation, autograd rejection, and dependency isolation are tested separately.
+
+SwiGLU checks cover all three dtypes, CPU FP64 reference math, CUDA/PyTorch comparisons, autograd, odd `D`, empty batches, contiguous offset views, and extreme gate values.
 
 ## Benchmarks
 
@@ -527,7 +573,15 @@ python benchmarks/bench_rms_norm.py \
     --runs 5
 ```
 
-Benchmarks use CUDA Graph replay and sweep:
+Run SwiGLU activation:
+
+```bash
+python benchmarks/bench_silu_and_mul.py \
+    --dtype bf16 \
+    --runs 5
+```
+
+Benchmarks use CUDA Graph replay. RMSNorm benchmarks sweep:
 
 ```text
 FP16
@@ -548,6 +602,8 @@ GPU state
 
 Fused timing uses zero inputs so repeated in-place calls remain idempotent. Correctness tests use nonzero inputs.
 
+SwiGLU defaults to BF16 with rows `1, 16, 128, 512` and output widths `1024, 4096, 8192`. It warms up each backend for 20 calls, alternates backend order across five repeats, and records the Triton source hash alongside timing and GPU state metadata.
+
 See [`docs/profiling.md`](docs/profiling.md) for Nsight Compute commands, archived reports, and the source revisions corresponding to recorded measurements.
 
 ## Repository layout
@@ -557,6 +613,7 @@ src/kernscope/
 ├── ops/
 │   ├── rms_norm.py
 │   ├── fused_add_rms_norm.py
+│   ├── silu_and_mul.py
 │   └── ...
 │
 └── backends/
@@ -570,6 +627,7 @@ benchmarks/
 docs/
 ├── profiling.md
 ├── rms_norm_nsight_results.md
+├── silu_and_mul_baseline.md
 └── ...
 
 tests/ops/
@@ -609,6 +667,10 @@ RMSNorm
 └── TileLang-Ascend
 
 Fused residual-add RMSNorm
+├── PyTorch
+└── Triton CUDA
+
+SwiGLU activation
 ├── PyTorch
 └── Triton CUDA
 ```
