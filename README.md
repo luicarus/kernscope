@@ -2,13 +2,14 @@
 
 A small LLM inference operator library with PyTorch, Triton CUDA, and TileLang-Ascend backends.
 
-Kernscope provides directly callable inference operators behind a small Python API. Each operator has an explicit numerical contract, reference implementation, correctness tests, and backend-specific kernels.
+Kernscope provides directly callable inference operators behind a small Python API. Operators have explicit numerical contracts, reference implementations, and correctness tests; accelerator kernels are available where listed below.
 
 Current operators:
 
 - **RMSNorm**
 - **fused residual-add RMSNorm**
 - **SwiGLU activation (`silu_and_mul`)**
+- **GEMV**
 
 Current backends:
 
@@ -23,6 +24,7 @@ Current backends:
 | `rms_norm` | CPU / CUDA | CUDA | Ascend NPU |
 | `fused_add_rms_norm` | CPU / CUDA | CUDA | — |
 | `silu_and_mul` | CPU / CUDA | CUDA | — |
+| `gemv` | CPU / CUDA | CUDA | — |
 
 Backend selection is explicit:
 
@@ -178,6 +180,19 @@ y = silu_and_mul(x, backend="triton")
 # y has shape (8, 4096); x is unchanged.
 ```
 
+### GEMV
+
+```python
+import torch
+
+from kernscope import gemv
+
+x = torch.randn(5, dtype=torch.bfloat16)
+weight = torch.randn(3, 5, dtype=x.dtype)
+y = gemv(x, weight)
+# y has shape (3,); x and weight are unchanged.
+```
+
 ## Numerical contract
 
 ### RMSNorm
@@ -239,6 +254,14 @@ output = cast_to_input_dtype(gate * sigmoid(gate) * up)
 
 All intermediate calculations use FP32; only the final output is cast to the input dtype.
 
+### GEMV
+
+```text
+output = cast_to_input_dtype(fp32(weight) @ fp32(x))
+```
+
+GEMV computes a matrix-vector product without bias, using FP32 multiplication and accumulation. The reference disables autocast locally to preserve this precision.
+
 ## API contract
 
 The RMSNorm operators accept `eps=1e-6`. All operators use keyword-only `backend="torch"` by default.
@@ -279,6 +302,8 @@ triton
 
 `silu_and_mul` supports the same two backends and has no `eps` parameter.
 
+`gemv(x, weight, *, backend="torch")` supports `torch` and `triton`, with no bias or `eps` parameter.
+
 ### Inputs
 
 Supported dtypes:
@@ -317,7 +342,9 @@ For `fused_add_rms_norm`:
 
 For `silu_and_mul`, `x` has shape `(..., 2D)` with a nonempty, even final dimension. It must be contiguous and use a supported dtype. `D` may be odd, and batch dimensions may be zero. The result is a new tensor of shape `(..., D)`, preserving dtype and device; `x` is read-only.
 
-The PyTorch references for `rms_norm` and `silu_and_mul` support autograd.
+For `gemv`, `x` has shape `(H,)` with `H > 0`, and `weight` has shape `(N, H)`. Both must be contiguous and share a supported dtype and device. `N=0` returns an empty output. The result is a new tensor of shape `(N,)`, preserving dtype and device. Both inputs are read-only and may share storage.
+
+The PyTorch references for `rms_norm`, `silu_and_mul`, and `gemv` support autograd.
 
 Triton and TileLang-Ascend kernels are inference-only and reject tensors requiring gradients.
 
@@ -327,6 +354,7 @@ The CUDA kernels are implemented in:
 
 ```text
 src/kernscope/backends/triton.py
+src/kernscope/backends/triton_gemv.py
 ```
 
 ### RMSNorm
@@ -386,6 +414,10 @@ The current launch configuration is:
 ### SwiGLU activation
 
 One Triton program handles 1024 flattened output elements with four warps. It loads matching gate and up values, computes SiLU and multiplication in FP32, and writes the input-dtype output. Masks handle partial blocks; the input remains unchanged.
+
+### GEMV
+
+One Triton program computes one output row with four warps. It uses 1024-element blocks when `N>=512` and `H` is 1024 or 2048, and 256-element blocks otherwise. It loads `x` and `weight` into FP32, accumulates products, then reduces and stores the input-dtype result. Masks cover partial blocks, and empty outputs skip the launch. Both inputs remain unchanged; this backend is inference-only.
 
 ## TileLang-Ascend backend
 
@@ -514,6 +546,14 @@ At BF16 input `512×8192` and output `512×4096`, CUDA Graph latency is **68.634
 
 The [SwiGLU results table](docs/silu_and_mul_baseline.md) records the selected initial configuration: 1024 output elements/program and four warps. Subsequent parameter, indexing, cache, and load-order experiments did not establish sufficient benefit to replace it. These results apply to the measured reference and workload.
 
+### GEMV measurements
+
+At BF16 weights `4096×4096` and a single input vector of length 4096, CUDA Graph medians are **180.332 µs** for Triton and **181.499 µs** for native `torch.mv`. The FP32 reference is **926.073 µs**, including weight conversion. These are separate paths; the native and Triton timings are close. Nsight records **181.760 µs** kernel latency and **96.70%** DRAM throughput. See the [GEMV metrics table](docs/gemv_nsight_results.md) and [profiling guide](docs/profiling.md) for scope and raw evidence.
+
+The original baseline above uses 1024 columns per block. The block-256 stage uses **256 columns and 4 warps**. In a separate paired Nsight comparison at BF16 weights `4096×8192`, latency falls from **392.416 to 360.544 µs (8.1%)**, registers from **64 to 39**, and compiler-reported spills from **2 to 0**. At `4096×4096`, paired latency remains **181.376 µs**. CUDA Graph follow-up at `4096×8192` improves **390.071→359.431 µs (7.9%)**; `4096×4096` stays near 180.33 µs, while `512×1024` regresses **13.2%**. An independent block-256 run records **359.497 µs** for Triton versus **360.838 µs** for native `torch.mv`; see the profiling guide for raw samples and measurement scope.
+
+The current short-H rule selects 1024 columns at `N>=512`, `H∈{1024,2048}`. Paired BF16 CUDA Graph latency at `512×1024` improves **3.167→2.824 µs (10.8%)**, restoring the original block-1024 performance level; `512×2048` improves **4.438→4.282 µs (3.5%)**. Wide-H controls remain essentially unchanged. Cold-cache Nsight latency at `512×1024` is essentially unchanged (8.000→8.064 µs), with registers 22→21. See the profiling guide for the paired and independent benchmark samples.
+
 ## Correctness
 
 Run the complete test suite with:
@@ -553,6 +593,8 @@ Backend dispatch, device validation, autograd rejection, and dependency isolatio
 
 SwiGLU checks cover all three dtypes, CPU FP64 reference math, CUDA/PyTorch comparisons, autograd, odd `D`, empty batches, contiguous offset views, and extreme gate values.
 
+GEMV CPU checks cover all three dtypes, FP64 reference math, FP32 accumulation, input gradients, empty outputs, contiguous offset views, and read-only input aliasing. CUDA tests compare Triton with both the PyTorch reference and FP64 math, including partial blocks, offset views, aliasing, and inference-only validation. Autocast checks preserve the FP32 contract.
+
 ## Benchmarks
 
 Run the CUDA RMSNorm benchmark:
@@ -577,6 +619,14 @@ Run SwiGLU activation:
 
 ```bash
 python benchmarks/bench_silu_and_mul.py \
+    --dtype bf16 \
+    --runs 5
+```
+
+Run GEMV:
+
+```bash
+python benchmarks/bench_gemv.py \
     --dtype bf16 \
     --runs 5
 ```
@@ -614,10 +664,12 @@ src/kernscope/
 │   ├── rms_norm.py
 │   ├── fused_add_rms_norm.py
 │   ├── silu_and_mul.py
+│   ├── gemv.py
 │   └── ...
 │
 └── backends/
     ├── triton.py
+    ├── triton_gemv.py
     └── tilelang_ascend.py
 
 benchmarks/
@@ -628,6 +680,7 @@ docs/
 ├── profiling.md
 ├── rms_norm_nsight_results.md
 ├── silu_and_mul_baseline.md
+├── gemv_nsight_results.md
 └── ...
 
 tests/ops/
@@ -671,6 +724,10 @@ Fused residual-add RMSNorm
 └── Triton CUDA
 
 SwiGLU activation
+├── PyTorch
+└── Triton CUDA
+
+GEMV
 ├── PyTorch
 └── Triton CUDA
 ```

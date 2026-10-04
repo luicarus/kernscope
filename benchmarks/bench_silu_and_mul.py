@@ -1,7 +1,5 @@
 import argparse
 import csv
-import hashlib
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,7 +7,7 @@ import torch
 import triton
 import triton.testing
 
-from _environment import GPU_FIELDS, gpu_state
+from _environment import GPU_FIELDS, gpu_state, source_metadata
 from kernscope import silu_and_mul
 
 
@@ -17,25 +15,6 @@ DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
 TOLERANCES = {"fp16": 1e-3, "bf16": 1e-2, "fp32": 1e-6}
 ROOT = Path(__file__).resolve().parents[1]
 KERNEL_SOURCE = ROOT / "src/kernscope/backends/triton.py"
-
-
-def source_metadata():
-    try:
-        revision = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
-        ).stdout.strip()
-        dirty = bool(
-            subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-        )
-    except (OSError, subprocess.CalledProcessError):
-        revision, dirty = "unknown", None
-    return hashlib.sha256(KERNEL_SOURCE.read_bytes()).hexdigest(), revision, dirty
 
 
 def main():
@@ -66,7 +45,7 @@ def main():
         parser.error(f"{output} exists; choose a new path or pass --overwrite")
 
     torch.manual_seed(0)
-    kernel_hash, source_revision, dirty = source_metadata()
+    kernel_hash, source_revision, dirty = source_metadata(KERNEL_SOURCE)
     versions = [torch.__version__, torch.version.cuda or "unknown", triton.__version__]
     results = []
     with torch.inference_mode():

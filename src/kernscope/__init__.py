@@ -1,5 +1,5 @@
 """Reusable LLM inference operators for memory-constrained GPUs."""
 
-from kernscope.ops import fused_add_rms_norm, rms_norm, silu_and_mul
+from kernscope.ops import fused_add_rms_norm, gemv, rms_norm, silu_and_mul
 
-__all__ = ["fused_add_rms_norm", "rms_norm", "silu_and_mul"]
+__all__ = ["fused_add_rms_norm", "gemv", "rms_norm", "silu_and_mul"]
