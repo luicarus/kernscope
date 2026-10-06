@@ -38,3 +38,12 @@ def source_metadata(path):
     except (OSError, subprocess.CalledProcessError):
         revision, dirty = "unknown", None
     return hashlib.sha256(path.read_bytes()).hexdigest(), revision, dirty
+
+
+def thermal_state():
+    result = subprocess.run(
+        ["nvidia-smi", "--query-gpu=clocks_event_reasons.sw_thermal_slowdown",
+         "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()

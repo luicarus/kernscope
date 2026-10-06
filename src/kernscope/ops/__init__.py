@@ -4,5 +4,6 @@ from kernscope.ops.fused_add_rms_norm import fused_add_rms_norm
 from kernscope.ops.gemv import gemv
 from kernscope.ops.rms_norm import rms_norm
 from kernscope.ops.silu_and_mul import silu_and_mul
+from kernscope.ops.softmax import softmax
 
-__all__ = ["fused_add_rms_norm", "gemv", "rms_norm", "silu_and_mul"]
+__all__ = ["fused_add_rms_norm", "gemv", "rms_norm", "silu_and_mul", "softmax"]

@@ -10,6 +10,7 @@ Current operators:
 - **fused residual-add RMSNorm**
 - **SwiGLU activation (`silu_and_mul`)**
 - **GEMV**
+- **Softmax**
 
 Current backends:
 
@@ -25,6 +26,7 @@ Current backends:
 | `fused_add_rms_norm` | CPU / CUDA | CUDA | — |
 | `silu_and_mul` | CPU / CUDA | CUDA | — |
 | `gemv` | CPU / CUDA | CUDA | — |
+| `softmax` | CPU / CUDA | CUDA | — |
 
 Backend selection is explicit:
 
@@ -193,6 +195,18 @@ y = gemv(x, weight)
 # y has shape (3,); x and weight are unchanged.
 ```
 
+### Softmax
+
+```python
+import torch
+
+from kernscope import softmax
+
+x = torch.randn(2, 5, dtype=torch.bfloat16)
+y = softmax(x)
+# y has shape (2, 5); x is unchanged.
+```
+
 ## Numerical contract
 
 ### RMSNorm
@@ -262,6 +276,15 @@ output = cast_to_input_dtype(fp32(weight) @ fp32(x))
 
 GEMV computes a matrix-vector product without bias, using FP32 multiplication and accumulation. The reference disables autocast locally to preserve this precision.
 
+### Softmax
+
+```text
+z      = fp32(x) - max(fp32(x), dim=-1, keepdim=True)
+output = cast_to_input_dtype(exp(z) / sum(exp(z), dim=-1, keepdim=True))
+```
+
+The reference uses `torch.softmax(x.float(), dim=-1)` with autocast disabled locally. Negative infinity masks individual entries when the row contains finite values. Rows containing NaN or positive infinity, and rows entirely equal to negative infinity, produce NaN outputs as in PyTorch.
+
 ## API contract
 
 The RMSNorm operators accept `eps=1e-6`. All operators use keyword-only `backend="torch"` by default.
@@ -304,6 +327,8 @@ triton
 
 `gemv(x, weight, *, backend="torch")` supports `torch` and `triton`, with no bias or `eps` parameter.
 
+`softmax(x, *, backend="torch")` supports `torch` and `triton`, and always operates on the last dimension.
+
 ### Inputs
 
 Supported dtypes:
@@ -344,7 +369,9 @@ For `silu_and_mul`, `x` has shape `(..., 2D)` with a nonempty, even final dimens
 
 For `gemv`, `x` has shape `(H,)` with `H > 0`, and `weight` has shape `(N, H)`. Both must be contiguous and share a supported dtype and device. `N=0` returns an empty output. The result is a new tensor of shape `(N,)`, preserving dtype and device. Both inputs are read-only and may share storage.
 
-The PyTorch references for `rms_norm`, `silu_and_mul`, and `gemv` support autograd.
+For `softmax`, `x` has shape `(..., H)` with `H > 0`, is contiguous, and uses a supported dtype. Leading dimensions may be zero. The result is a new tensor with the same shape, dtype and device; `x` is read-only.
+
+The PyTorch references for `rms_norm`, `silu_and_mul`, `gemv`, and `softmax` support autograd.
 
 Triton and TileLang-Ascend kernels are inference-only and reject tensors requiring gradients.
 
@@ -355,6 +382,7 @@ The CUDA kernels are implemented in:
 ```text
 src/kernscope/backends/triton.py
 src/kernscope/backends/triton_gemv.py
+src/kernscope/backends/triton_softmax.py
 ```
 
 ### RMSNorm
@@ -418,6 +446,10 @@ One Triton program handles 1024 flattened output elements with four warps. It lo
 ### GEMV
 
 One Triton program computes one output row with four warps. It uses 1024-element blocks when `N>=512` and `H` is 1024 or 2048, and 256-element blocks otherwise. It loads `x` and `weight` into FP32, accumulates products, then reduces and stores the input-dtype result. Masks cover partial blocks, and empty outputs skip the launch. Both inputs remain unchanged; this backend is inference-only.
+
+### Softmax
+
+One Triton program normalizes two rows when the flattened row count `N>=512` and `H<=1024`, excluding `H=1023`; other cases use one row. It uses one warp when `H<=256` and four warps otherwise. The block size is the next power of two at least as large as H; masks cover partial rows and columns, with masked loads using negative infinity. Max, exponential, sum and division use FP32, followed by an input-dtype store. Empty leading dimensions skip the launch; inputs requiring gradients are rejected.
 
 ## TileLang-Ascend backend
 
@@ -554,6 +586,14 @@ The original baseline above uses 1024 columns per block. The block-256 stage use
 
 The current short-H rule selects 1024 columns at `N>=512`, `H∈{1024,2048}`. Paired BF16 CUDA Graph latency at `512×1024` improves **3.167→2.824 µs (10.8%)**, restoring the original block-1024 performance level; `512×2048` improves **4.438→4.282 µs (3.5%)**. Wide-H controls remain essentially unchanged. Cold-cache Nsight latency at `512×1024` is essentially unchanged (8.000→8.064 µs), with registers 22→21. See the profiling guide for the paired and independent benchmark samples.
 
+### Softmax measurements
+
+At BF16 input/output `512×1024`, baseline CUDA Graph medians are **6.096 µs** for Triton and **8.472 µs** for native `torch.softmax` (**1.39×**); the conversion-inclusive FP32 reference is **47.102 µs**. The four-warp baseline is about **75% slower** at `512×128`, so the gain is shape-specific. The separate Nsight Compute median of three launches is **10.464 µs**, with **23 registers/thread**, **77.17%** achieved occupancy and **86.57%** DRAM throughput. See the [Softmax metrics table](docs/softmax_nsight_results.md) and [profiling guide](docs/profiling.md) for sampling, source hashes and raw evidence.
+
+The short-H warp stage selects one warp for `H<=256` and keeps four warps for wider rows. Paired BF16 CUDA Graph latency at `512×128` falls **3.882→2.233 µs (42.5%)**, and at `512×256` **5.889→3.748 µs (36.3%)**. Each paired repeat improves at both shapes; the `512×1024/4096/8192` controls remain near their earlier latency. Separate paired Nsight latency falls **6.304→4.160 µs (34.0%)** and **6.656→4.672 µs (29.8%)** at the two short-row shapes. At H=128, registers stay at 16 while occupancy falls 82.49%→22.11%; at H=256, registers rise 17→20. Results apply to these shapes and the recorded GPU state.
+
+The current row-grouping stage uses two rows when `N>=512` and `H<=1024`, excluding `H=1023` after measured regressions. Paired BF16 Nsight medians of five launches fall **10.912→10.592 µs (2.9%)** at `512×1024` and **4.096→3.552 µs (13.3%)** at `512×128`. At the main shape, registers rise **23→34** and occupancy falls **76.40%→64.42%**, with no compiler-reported spills. CUDA Graph medians independently fall **6.090→5.483 µs (10.0%)** and **2.238→1.625 µs (27.4%)**. The main Nsight gain is modest and individual samples vary. Performance claims here cover BF16; all three dtypes pass correctness checks. See the profiling guide for raw evidence and sampling scope.
+
 ## Correctness
 
 Run the complete test suite with:
@@ -595,6 +635,8 @@ SwiGLU checks cover all three dtypes, CPU FP64 reference math, CUDA/PyTorch comp
 
 GEMV CPU checks cover all three dtypes, FP64 reference math, FP32 accumulation, input gradients, empty outputs, contiguous offset views, and read-only input aliasing. CUDA tests compare Triton with both the PyTorch reference and FP64 math, including partial blocks, offset views, aliasing, and inference-only validation. Autocast checks preserve the FP32 contract.
 
+Softmax CPU/CUDA checks cover all three dtypes, FP64 reference math, widths 1–16384, large logits, nonfinite rows, empty batches, contiguous offset views and autocast state preservation. A 65536-column FP16 case checks FP32 denominator accumulation. The PyTorch reference supports input gradients; Triton rejects them. CPU reference use remains independent of Triton installation.
+
 ## Benchmarks
 
 Run the CUDA RMSNorm benchmark:
@@ -627,6 +669,14 @@ Run GEMV:
 
 ```bash
 python benchmarks/bench_gemv.py \
+    --dtype bf16 \
+    --runs 5
+```
+
+Run Softmax:
+
+```bash
+python benchmarks/bench_softmax.py \
     --dtype bf16 \
     --runs 5
 ```
@@ -665,11 +715,13 @@ src/kernscope/
 │   ├── fused_add_rms_norm.py
 │   ├── silu_and_mul.py
 │   ├── gemv.py
+│   ├── softmax.py
 │   └── ...
 │
 └── backends/
     ├── triton.py
     ├── triton_gemv.py
+    ├── triton_softmax.py
     └── tilelang_ascend.py
 
 benchmarks/
@@ -681,6 +733,7 @@ docs/
 ├── rms_norm_nsight_results.md
 ├── silu_and_mul_baseline.md
 ├── gemv_nsight_results.md
+├── softmax_nsight_results.md
 └── ...
 
 tests/ops/
@@ -728,6 +781,10 @@ SwiGLU activation
 └── Triton CUDA
 
 GEMV
+├── PyTorch
+└── Triton CUDA
+
+Softmax
 ├── PyTorch
 └── Triton CUDA
 ```

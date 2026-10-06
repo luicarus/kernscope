@@ -14,10 +14,11 @@ Read [README.md](README.md) for the supported APIs, environment, and measured re
 - Establish a PyTorch reference and input contract before adding a Triton implementation.
 - Preserve the public signatures and mutation behavior documented in the README.
 - Support FP16, BF16, and FP32 with FP32 intermediates and input-dtype outputs.
-- Keep the PyTorch references for `rms_norm`, `silu_and_mul`, and `gemv` usable on CPU and with autograd. Triton and other accelerator backends are inference-only.
+- Keep the PyTorch references for `rms_norm`, `silu_and_mul`, `gemv`, and `softmax` usable on CPU and with autograd. Triton and other accelerator backends are inference-only.
 - `fused_add_rms_norm` is an in-place, inference-only PyTorch and Triton operator. It updates both `x` and `residual`, returns `None`, and normalizes the FP32 sum before storage rounding. Its input storage regions must not overlap.
 - `silu_and_mul` returns a new tensor, leaves `x` unchanged, and computes `silu(gate) * up` in FP32 before casting to the input dtype.
 - `gemv` reads `x (H,)` and `weight (N, H)` and returns a new `(N,)` tensor. `H` is nonempty; `N=0` returns an empty output. Read-only inputs may share storage.
+- `softmax` normalizes the nonempty last dimension using FP32 intermediates, returns a new tensor, and leaves `x` unchanged. Empty leading dimensions are allowed; nonfinite rows follow PyTorch semantics.
 - Prefer concise, readable code and short comments. Keep validation errors clear and avoid abstractions without a concrete use.
 
 ## Validation

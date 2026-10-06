@@ -145,6 +145,105 @@ Tested delaying FP32 conversion until both inputs were loaded, with launch param
 
 The paired BF16 Nsight comparison showed no useful latency gain at the measured short/wide configurations. Keep the existing explicit conversion after each load. Rejected source, cubins and profiling results were removed; selected kernel and retained reports remain unchanged.
 
+## Softmax BF16 baseline
+
+```bash
+python benchmarks/bench_softmax.py --rows 1 16 128 512 --hidden-size 128 1024 4096 8192 --dtype bf16 --runs 5 --rep-ms 50 --warmup 20
+```
+
+Inputs and outputs have shape `rows×H`. The benchmark uses seed 0, 20 warmup calls, CUDA Graph replay and five repeats with backend order rotated and reversed. Summaries take the median of five per-repeat medians. The three paths are the public FP32-intermediate reference (including input/output conversions), native `torch.softmax(x, dim=-1)` in the input dtype, and the public Triton API. Outputs are checked against the reference before timing. CSV metadata records versions, shape, dtype, source hashes, Git revision, dirty state, GPU state and software thermal-slowdown status. A thermal-state failure aborts the run before writing results.
+
+The [Nsight table](softmax_nsight_results.md), [NCU report](../benchmarks/results/softmax-bf16-512x1024-baseline.ncu-rep) and [per-launch CSV](../benchmarks/results/softmax-nsight-bf16-512x1024-baseline-20261005.csv) describe only the Triton kernel at `512×1024 BF16`, one row/program, four warps and block size 1024. Each table metric is the median of three launches, using six metrics, seven passes, `--cache-control all` and `--clock-control base`; DRAM Bytes is `dram__sectors.sum×32 B`. Kernel duration samples were 11.712, 10.304 and 10.464 µs; retain this variability when making future comparisons. Registers are 23/thread, achieved occupancy 77.17%, DRAM throughput 86.57%.
+
+Recorded environment: RTX 3050 Ti Laptop GPU (4 GB), driver 610.47, Ubuntu 24.04 / WSL2, Python 3.12.3, PyTorch 2.8.0+cu128, CUDA 12.8, Triton 3.4.0, Nsight Compute 2022.4.1.0. Kernel SHA256 is `71611108dd2ffe2c896d2402e035fc1614d214c7b592a247071c3286b9bdc306`; reference SHA256 is `bc9c4c76b074bd70bf02cf4d5a0e4b68b93850493e2e52019fa17ae4bd4bdeff`. Measurement predates committing the implementation; the source hashes identify it.
+
+The [CUDA Graph CSV](../benchmarks/results/softmax-baseline-20261005T121227Z.csv) covers 16 BF16 shapes and 240 samples (three paths, five repeats). Capture began with idle GPU utilization at 0%; every before/after thermal sample was `Not Active`. Recorded temperatures were 59–75°C, SM clocks 1695–1965 MHz and memory clocks 6001 MHz. No interrupted or abnormal timing data is retained.
+
+| Input/output shape | FP32 reference (µs) | Native torch.softmax (µs) | Triton (µs) |
+|---|---:|---:|---:|
+| 1×1024 | 6.511 | 4.094 | 1.381 |
+| 128×1024 | 10.070 | 4.516 | 2.221 |
+| 512×128 | 5.970 | 2.219 | 3.882 |
+| 512×1024 | 47.102 | 8.472 | 6.096 |
+| 512×4096 | 234.446 | 70.017 | 46.808 |
+| 512×8192 | 462.768 | 120.597 | 95.352 |
+
+At `512×1024`, Triton repeat medians span 6.070–6.139 µs and native repeat medians 8.454–8.482 µs; Triton is about 1.39× faster (28.1% lower latency). At `512×128`, Triton is about 75% slower than native. Some small-row cases contain timing outliers; all repeat samples are retained and summaries use medians. The conversion-inclusive reference has different memory traffic from native softmax. These CUDA Graph timings, the separate cold-cache Nsight measurements and serving latency are distinct measurement scopes; no uniform speedup is claimed.
+
+## Softmax short-H warps, round 4
+
+Keep one row/program and the next-power-of-two column block. Screening 1/2/4/8 warps found a clear short-row gain with one warp; at H=8192 it instead produced 108 compiler-reported spills. Two/eight-warps candidates did not establish a useful cold-cache latency improvement at the measured wider rows. Boundary checks at H=64/127/128/129/256/257/512/513 support the conservative rule: one warp for `H<=256`, four otherwise. At H=512, one warp leaves cold-cache latency essentially unchanged while increasing registers 20→27; the wider scope was rejected.
+
+The [paired CUDA Graph CSV](../benchmarks/results/softmax-short-h-comparison-20261005T124546Z.csv) contains 400 samples: all 16 BF16 baseline shapes, 16 BF16 boundary cases, and eight FP16/FP32 short-row cases. It uses seed 0, the same input per pair, unchanged public API validation, 20 warmup calls, five repeats, 50 ms repetition time, alternating before/after order and input-dtype outputs. Summaries below are medians of five per-repeat medians. Source SHA256 is `71611108dd2ffe2c896d2402e035fc1614d214c7b592a247071c3286b9bdc306` before and `e6093007385fbfec41c730644131a7aa7ddbe199718163ff7b9b284dff9a9857` after; the reference hash is unchanged.
+
+| Input/output shape | Before, 4 warps (µs) | After, short-H rule (µs) | Latency change |
+|---|---:|---:|---:|
+| 512×128 BF16 | 3.882 | 2.233 | −42.5% |
+| 512×256 BF16 | 5.889 | 3.748 | −36.3% |
+| 512×1024 BF16 | 6.062 | 6.024 | −0.6% |
+| 512×4096 BF16 | 46.772 | 46.802 | +0.1% |
+| 512×8192 BF16 | 95.269 | 95.283 | ≈0% |
+
+Capture started at idle utilization 0%, 56°C, with thermal slowdown inactive. All before/after thermal samples were `Not Active`; sampled temperatures were 57–70°C, SM clocks 780–1957 MHz and memory clocks 810–6001 MHz. Automatic clock changes affect small cases: at `128×127`, repeat medians drift during the pair sequence, and even unchanged `512×257` launches have different aggregate medians. Retain all samples and make no uniform speedup claim. Each paired repeat improves at `512×128` and `512×256`; their observed reductions span 34.0–42.9% and 36.3–41.3%, respectively. FP16/FP32 short-row checks also pass and improve in the aggregate; their raw samples remain available.
+
+The [paired Nsight report](../benchmarks/results/softmax-bf16-short-h-comparison.ncu-rep) and [per-launch CSV](../benchmarks/results/softmax-nsight-short-h-20261005.csv) contain only the baseline and selected rule. They cover `512×H` at H=128/129/256/257/512/1024/8192, with fixed input/output buffers per shape, three alternating launches per configuration, the same six metrics, seven passes, `--cache-control all` and `--clock-control base`. The environment and source hashes are those above; idle utilization was 0%, both boundary temperatures were 60°C, SM clocks 1695 MHz and thermal slowdown inactive.
+
+Cold-cache latency falls **6.304→4.160 µs (34.0%)** at H=128 and **6.656→4.672 µs (29.8%)** at H=256; H=129 also improves 34.1%. Compiler-reported spills remain zero. At H=128, registers stay at 16, shared memory falls 16→0 B and achieved occupancy falls 82.49%→22.11%. At H=256, registers rise 17→20 and occupancy falls 83.87%→24.38%. Fewer collaborating warps improve latency despite lower occupancy and SM throughput. Wider rows retain four warps and identical compiled resource counts: unchanged H=1024 records 10.944/11.616 µs before/after, illustrating capture variability; H=8192 records 86.208/85.984 µs. These control differences are not launch-rule speedups. The [metrics table](softmax_nsight_results.md) retains the original `512×1024` baseline and adds only the paired short-row results.
+
+Correctness with the selected rule: **373 passed, 7 Ascend skipped** because the NPU stack is unavailable. The suite includes all three dtypes at H=128/129/256/257, nonfinite rows, offset views and the 65536-column FP16 denominator case. Reproduce the baseline in an isolated copy by fixing `num_warps=4`; the current profiling and benchmark scripts exercise the selected rule. Parameter sweeps stay outside the repository and are removed after selection.
+
+Reproduce the current short-row measurements with the existing scripts and new output paths:
+
+```bash
+python benchmarks/bench_softmax.py --rows 512 --hidden-size 128 256 --dtype bf16 --runs 5 --rep-ms 50 --warmup 20 --output benchmarks/results/softmax-short-h-new.csv
+```
+
+For Nsight, use the Softmax command below with `--hidden-size 128` or `256` and a matching new export path. Historical baseline sources are reconstructed in an isolated copy; no sweep controls or duplicate kernels remain in the package.
+
+## Softmax rows/program, round 5
+
+Keep the next-power-of-two column block and the round-4 warp rule. Screening 1/2/4 rows/program found a useful two-row short-H configuration. Four rows increased registers and shared memory; at H=8192 they produced 58 compiler-reported spills and slower latency. Five-launch boundary checks also found small-batch regressions. The selected rule uses two rows when `N>=512` and `H<=1024`, excluding `H=1023`; other cases use one. H=1023 grouping regressed warm latency by 2–3%, and cold latency by 4.3% at N=513, with higher register counts. The final one-row fallback restores its warm latency and register count. The package contains one kernel; row count is a runtime input, with row masks enabled for grouping, FP32 reductions on the column axis and 64-bit row offsets.
+
+The before backend SHA256 is `e6093007385fbfec41c730644131a7aa7ddbe199718163ff7b9b284dff9a9857`; selected SHA256 is `7967b460a166cf549ef4f80a2bd03e3a71ed068fcfd6bc38351f4cd7e57a48eb`. The public API/reference hash is unchanged. The recorded environment is the same RTX 3050 Ti Laptop GPU, driver 610.47, WSL2, Python 3.12.3, PyTorch 2.8.0+cu128, CUDA 12.8, Triton 3.4.0 and Nsight Compute 2022.4.1.0. CSVs record source revision and dirty state; this stage was measured before committing.
+
+The [paired Nsight report](../benchmarks/results/softmax-bf16-rows2-comparison-20261006T023203Z.ncu-rep) and [per-launch CSV](../benchmarks/results/softmax-nsight-rows2-20261006T023203Z.csv) contain only the prior implementation and selected rule, with the same BF16 input/output buffers per shape and alternating order. They cover 15 shapes and 150 launches, including short/wide H, N=511/512/513, H=1023/1025, larger N=1024/4096 and small-N controls. Sampling increases from three launches/configuration in earlier stages to **five** here; each table metric takes its own median. Collection still uses six metrics, seven passes, `--cache-control all` and `--clock-control base`; DRAM Bytes is `dram__sectors.sum×32 B`. Initial GPU utilization was 0%; boundary temperatures were 59/60°C, SM clocks 1695 MHz and memory clocks 6001 MHz, with thermal slowdown inactive at both boundaries.
+
+At `512×1024`, cold-cache latency falls **10.912→10.592 µs (2.9%)**, registers rise **23→34**, occupancy falls **76.40%→64.42%** and compiler-reported spills remain zero. This is a modest median gain: paired changes range from 9.9% faster to 8.5% slower. At `512×128`, latency falls **4.096→3.552 µs (13.3%)**, registers 16→18 and DRAM traffic 180,480→131,840 B; logical input/output sizes are unchanged. At `512×256`, latency falls **4.864→4.384 µs (9.9%)**, registers 20→31. All five Nsight pairs improve at the two short shapes. H=512 is near unchanged with registers 20→25; wide-H and small-N controls keep the same compiled register counts and near their previous latency. The [metrics table](softmax_nsight_results.md) preserves earlier results and adds same-round before/after rows.
+
+The [paired CUDA Graph CSV](../benchmarks/results/softmax-rows2-bf16-comparison-20261006T023347Z.csv) retains 370 BF16 samples: all 16 baseline shapes and 21 boundary/larger-N cases. It uses the unchanged public API, the same input per pair, seed 0, 20 warmup calls, five repeats, 50 ms repetition time and alternating order. Capture starts with utilization 0%; all retained thermal samples are `Not Active`. Sampled temperatures are 60–76°C, SM clocks 780–1950 MHz and memory clocks 5501–6001 MHz. Summaries take the median of five per-repeat medians. The later FP16/FP32 timing stage was removed as a whole (80 samples): latency rose while GPU load persisted after the benchmark and thermal slowdown became active. Only the earlier BF16 stage is used for performance claims; no BF16 repeat is removed.
+
+| Input/output shape | Before, one row (µs) | After, selected rule (µs) | Latency change |
+|---|---:|---:|---:|
+| 512×128 BF16 | 2.238 | 1.625 | −27.4% |
+| 512×256 BF16 | 4.571 | 3.556 | −22.2% |
+| 512×1024 BF16 | 6.090 | 5.483 | −10.0% |
+| 512×4096 BF16 | 46.755 | 46.786 | +0.1% |
+| 512×8192 BF16 | 95.411 | 95.404 | ≈0% |
+
+At `512×1024`, every CUDA Graph pair improves 9.6–10.3%; at `512×256`, every pair improves 20.7–26.0%. At `512×128`, one pair regresses 16.2% despite the improved aggregate; all its cold-cache Nsight pairs improve 11.7–15.9%. Larger BF16 N=1024/4096 improve at H=128, while H=1024 warm latency is near unchanged. The H=1023 fallback keeps warm latency near 7.04/7.11 µs at N=512/513. Automatic clock changes affect small controls; retain their repeats and do not infer a uniform speedup. These data are separate from the cold-cache Nsight results.
+
+Correctness with the final implementation: **439 passed, 7 Ascend skipped** because the NPU stack is unavailable. New cases cover all three dtypes at N=511/512/513, H=1023/1024/1025, odd-width grouped tails, offset views and nonfinite rows. The FP16 65536-column denominator case still passes. Reproduce the selected rule with the existing benchmark and profiling scripts. In an isolated copy, fixing `rows_per_program=1` provides an equivalent one-row control; the original before source uses scalar row indexing, a one-dimensional column range and reductions on axis 0. Original source hashes above identify the archived measurements. Rejected trial source and disposable reports are removed after selection.
+
+## Softmax load vectorization and cache, round 6
+
+BF16 PTX/SASS inspection keeps the round-5 launch rule. Aligned H=128/256/1024/4096/8192 already use `ld.global.v4.b32` / `LDG.E.128` and 128-bit stores. H=1023 uses 16-bit scalar loads/stores. At H=1024 with input storage offset 1, loads become scalar while output stores remain vectorized; the input contract permits these views, so no stronger alignment assumption is added.
+
+The isolated `.cg` candidate changes load caching to `LDG.E.*.STRONG.GPU`. After removing that modifier, normalized SASS instructions match the default for all seven inspected cases. Registers, spills, shared memory and instruction counts are unchanged; the aligned main shape has 34 registers, zero spills and 328 static SASS instructions. The candidate passes all **199 Softmax correctness cases**, including CPU/CUDA and all three dtypes.
+
+Timing resumed after idle utilization returned to 0% and thermal slowdown cleared. The BF16 comparison covers ten cases: N=512 with H=128/256/1023/1024/4096/8192, N=1/128/1024 at H=1024, and a `512×1024` input with storage offset 1. Both paths use identical inputs, fixed output buffers for Nsight, alternating order and five samples/configuration. Nsight uses the existing six metrics, seven passes, cache flushing and requested base clocks; boundary temperatures are 58/59°C and SM/memory clocks 1695/6001 MHz, with thermal slowdown inactive. CUDA Graph uses 20 warmups, five repeats and 50 ms repetition time; temperature samples are 59–72°C, with SM clocks 1237–1950 MHz and memory clocks 6001 MHz. Thermal checks remain inactive throughout its accepted boundaries.
+
+The main cold-cache median is **11.360→11.456 µs** with `.cg` (0.8% slower); warm CUDA Graph latency is **5.492→5.471 µs**, essentially unchanged. Other aligned cases do not establish a useful gain. The unaligned offset view instead regresses **10.880→17.248 µs (58.5%)** in Nsight and **6.669→12.066 µs (80.9%)** in CUDA Graph. Register/spill counts remain unchanged. Keep the default load policy; no stronger alignment requirement is introduced. Rejected `.cg` source, cubins, disassembly and timing reports are removed; the selected kernel and existing metrics tables are preserved.
+
+## Softmax grouped-row warp sweep, round 7
+
+Keep the round-5 row rule and default caching; scan 1/2/4/8 warps only in grouped cases. The eight BF16 cases cover N=512 at H=128/129/256/512/1024, N=513/1024 at H=1024, and an unaligned `512×1024` input. Three-repeat CUDA Graph screening uses 20 warmups and 20 ms repetition time. At the main shape, 8 warps reduce registers 34→25 but increase warm latency 5.872→6.766 µs; 1/2 warps use 79/52 registers. At H=512, one warp lowers screening latency 3.837→3.450 µs with registers 25→50. These screening results do not select a new runtime configuration.
+
+The 1/2/8-warp candidates each pass all **199 Softmax correctness cases**, using the existing row rule and tolerances for FP16/BF16/FP32. Timing resumed after Windows and WSL both reported idle utilization 0%, 60°C and no thermal slowdown. The paired Nsight scan contains 160 launches: eight BF16 cases, four warp counts and five alternating samples/configuration, using fixed buffers, the existing six metrics, seven passes, cache flushing and requested base clocks. GPU-state boundaries were 59/61°C, SM/memory clocks 1695/6001 MHz and thermal slowdown inactive.
+
+Keep the current warp rule. At `512×1024`, four warps are fastest at **10.752 µs**; one/two/eight warps record **11.616/11.488/11.808 µs**. Eight warps reduce registers 34→25 and increase occupancy 64.83%→82.19%, but latency increases **9.8%**. At H=128/129, one warp remains best. At H=512, one warp leaves cold-cache latency essentially unchanged (7.328→7.360 µs), doubles registers 25→50 and lowers occupancy 67.49%→18.49%. At H=256, two warps reduce registers 31→19 with a small cold-cache gain (4.384→4.288 µs), but CUDA Graph screening regresses 2.223→2.771 µs (24.7%); this tradeoff does not justify replacing one warp.
+
+At `1024×1024`, one warp shows a small cold/warm screening gain with registers 34→79 and occupancy 77.88%→25.73%. Broader large-N confirmation was stopped by renewed GPU interference before capture; no large-N rule is adopted from that limited evidence. The package and existing metrics tables keep the prior configuration. Rejected variants, screening data and disposable profiling reports are removed; the experiment summary is retained here.
+
 ## Nsight Compute
 
 Nsight Compute must be installed separately and have access to GPU performance counters. The following Bash commands capture the current kernels into new report paths outside the repository:
@@ -173,15 +272,21 @@ ncu --metrics "$metrics" --target-processes all \
   --kernel-name regex:gemv_kernel --launch-count 3 \
   --export /tmp/kernscope-gemv \
   python benchmarks/profile_gemv.py --rows 4096 --hidden-size 4096 --dtype bf16 --iterations 3
+
+ncu --metrics "$metrics" --target-processes all \
+  --cache-control all --clock-control base \
+  --kernel-name regex:softmax_kernel --launch-count 5 \
+  --export /tmp/kernscope-softmax \
+  python benchmarks/profile_softmax.py --rows 512 --hidden-size 1024 --dtype bf16 --iterations 5
 ```
 
-Choose a new export path for subsequent runs. Each report contains three profiled launches. `fused_add_rms_norm` profiling invokes the operator three times on the same tensors, so each call consumes the preceding call's updated values. Open `.ncu-rep` files in Nsight Compute or inspect their raw metrics with:
+Choose a new export path for subsequent runs. The commands capture three launches per operator, except current Softmax which uses five. `fused_add_rms_norm` profiling invokes the operator three times on the same tensors, so each call consumes the preceding call's updated values. Open `.ncu-rep` files in Nsight Compute or inspect their raw metrics with:
 
 ```bash
 ncu --import /tmp/kernscope-fused-rmsnorm.ncu-rep --page raw --csv
 ```
 
-The results tables for [RMSNorm](rms_norm_nsight_results.md), [SwiGLU](silu_and_mul_baseline.md), and [GEMV](gemv_nsight_results.md) take the median of each metric across three launches; `DRAM Bytes` is `dram__sectors.sum × 32 B`. GEMV uses the same six metrics and seven collection passes per launch. These are profiled kernel measurements, separate from CUDA Graph timings and serving latency. Registers, occupancy, and throughput explain tradeoffs; none alone establishes a speedup.
+The results tables for [RMSNorm](rms_norm_nsight_results.md), [SwiGLU](silu_and_mul_baseline.md), [GEMV](gemv_nsight_results.md), and [Softmax](softmax_nsight_results.md) take the median of each metric across three launches; Softmax row-grouping comparisons use five. `DRAM Bytes` is `dram__sectors.sum × 32 B`. GEMV and Softmax use the same six metrics and seven collection passes per launch. These are profiled kernel measurements, separate from CUDA Graph timings and serving latency. Registers, occupancy, and throughput explain tradeoffs; none alone establishes a speedup.
 
 ## Archived reports and implementations
 
